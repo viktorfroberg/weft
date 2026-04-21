@@ -5,20 +5,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@theme {
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "Inter", "SF Pro Text", sans-serif;
-  --font-mono: "SF Mono", Menlo, Monaco, "Courier New", monospace;
-
-  --color-bg: #1a1a1a;
-  --color-surface: #141414;
-  --color-border: #2a2a2a;
-  --color-text: #e6e6e6;
-  --color-muted: #8a8a8a;
-  --color-subtle: #6a6a6a;
-  --color-accent: #7aa2f7;
-}
-
 html,
 body,
 #root {
@@ -26,15 +12,49 @@ body,
   padding: 0;
   height: 100vh;
   overflow: hidden;
-  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.45;
-  color: var(--color-text);
-  background: var(--color-bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Theme cross-fade. When `.dark` toggles on `<html>`, chrome-level
+ * background and foreground colors tween over 150ms instead of
+ * snap-flipping. Scoped to surfaces that hold bg/fg tokens — lists,
+ * panels, borders — so we don't pay transition overhead on every
+ * descendant. xterm and Monaco manage their own palette swap and are
+ * explicitly excluded (they flash briefly, which is fine). */
+html,
+body {
+  transition:
+    background-color 150ms ease-in-out,
+    color 150ms ease-in-out;
+}
+[data-tauri-drag-region],
+.bg-background,
+.bg-card,
+.bg-sidebar,
+.bg-muted,
+.bg-accent,
+.bg-popover,
+.bg-primary,
+.bg-secondary,
+.text-foreground,
+.text-muted-foreground,
+.border-border {
+  transition:
+    background-color 150ms ease-in-out,
+    color 150ms ease-in-out,
+    border-color 150ms ease-in-out;
+}
+
+/* `@theme inline` is LOAD-BEARING for v1.0.5 runtime scheme switching.
+   Without `inline`, Tailwind v4 inlines the resolved value at build
+   time into each utility class (e.g. `bg-background` bakes in the
+   hex of `--background`). That breaks the `document.documentElement
+   .style.setProperty('--background', …)` pipeline in
+   `src/lib/themes/apply.ts`. Do not drop `inline` without migrating
+   the theming layer first. */
 @theme inline {
   --font-heading:
     var(--font-sans);
@@ -120,7 +140,7 @@ body,
 
 :root {
   --background:
-    oklch(1 0 0);
+    oklch(0.985 0 0);
   --foreground:
     oklch(0.145 0 0);
   --card:
@@ -142,9 +162,9 @@ body,
   --muted:
     oklch(0.97 0 0);
   --muted-foreground:
-    oklch(0.556 0 0);
+    oklch(0.42 0 0);
   --accent:
-    oklch(0.97 0 0);
+    oklch(0.94 0 0);
   --accent-foreground:
     oklch(0.205 0 0);
   --destructive:
@@ -168,7 +188,7 @@ body,
   --radius:
     0.625rem;
   --sidebar:
-    oklch(0.985 0 0);
+    oklch(0.975 0 0);
   --sidebar-foreground:
     oklch(0.145 0 0);
   --sidebar-primary:
@@ -176,7 +196,7 @@ body,
   --sidebar-primary-foreground:
     oklch(0.985 0 0);
   --sidebar-accent:
-    oklch(0.97 0 0);
+    oklch(0.94 0 0);
   --sidebar-accent-foreground:
     oklch(0.205 0 0);
   --sidebar-border:
@@ -191,7 +211,7 @@ body,
   --foreground:
     oklch(0.985 0 0);
   --card:
-    oklch(0.205 0 0);
+    oklch(0.195 0 0);
   --card-foreground:
     oklch(0.985 0 0);
   --popover:
@@ -209,9 +229,9 @@ body,
   --muted:
     oklch(0.269 0 0);
   --muted-foreground:
-    oklch(0.708 0 0);
+    oklch(0.78 0 0);
   --accent:
-    oklch(0.269 0 0);
+    oklch(0.305 0 0);
   --accent-foreground:
     oklch(0.985 0 0);
   --destructive:
@@ -241,7 +261,7 @@ body,
   --sidebar-primary-foreground:
     oklch(0.985 0 0);
   --sidebar-accent:
-    oklch(0.269 0 0);
+    oklch(0.305 0 0);
   --sidebar-accent-foreground:
     oklch(0.985 0 0);
   --sidebar-border:

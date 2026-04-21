@@ -1,0 +1,23 @@
+-- v1.0.7.x: initial prompt from the compose card becomes the agent's
+-- first user message.
+--
+-- Before this migration, the prompt typed in Home's compose card was
+-- persisted only as `tasks.name` (which also drove the sidebar title)
+-- and was never surfaced to the agent — when Claude launched, it had
+-- no idea what the user had typed. This pair of columns fixes that:
+--
+--   initial_prompt           — the full prompt text, stored once at
+--                              task_create time. Nullable for legacy
+--                              rows and for tasks created with an
+--                              empty compose box (name defaults to
+--                              "untitled" in that case).
+--
+--   initial_prompt_consumed_at — Unix millis when weft successfully
+--                              wrote the prompt into the agent's PTY.
+--                              NULL means "still needs to be sent" so
+--                              an app restart or delayed launch can
+--                              still deliver the prompt without re-
+--                              sending to a conversation that already
+--                              got it.
+ALTER TABLE tasks ADD COLUMN initial_prompt TEXT;
+ALTER TABLE tasks ADD COLUMN initial_prompt_consumed_at INTEGER;

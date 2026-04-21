@@ -1,0 +1,5 @@
+# Pin the Rust toolchain so contributors, `bun run tauri dev`, and CI
+# all agree on a version. Edition 2024 requires Rust 1.85+.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

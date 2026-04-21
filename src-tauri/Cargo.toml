@@ -2,8 +2,9 @@
 name = "weft"
 version = "0.1.0"
 description = "Multi-repo agent orchestration"
-authors = ["Lavendla"]
-edition = "2021"
+authors = ["Viktor Fröberg <viktorfroberg@gmail.com>"]
+edition = "2024"
+default-run = "weft"
 
 [lib]
 name = "weft_lib"
@@ -15,12 +16,51 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-thiserror = "1"
 dirs = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8"
+tower = "0.5"
+slug = "0.1"
+time = { version = "0.3", features = ["serde", "formatting"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+clap = { version = "4", features = ["derive"] }
+portable-pty = "0.8"
+parking_lot = "0.12"
+# Needed for the pid-based SIGKILL path in `terminal/session.rs` that
+# avoids holding a Mutex across child.wait() — which used to deadlock
+# `TerminalSession::Drop`.
+libc = "0.2"
+# macOS Keychain — stores external integration tokens (Linear etc).
+# Plaintext on disk is a non-starter (Time Machine, Spotlight, accidental
+# `git add` in a dotfiles repo all leak); `integrations.json` holds only
+# the list of connected providers, never a secret.
+security-framework = "3"
+# HTTP client for integration providers (Linear GraphQL etc). Inherits
+# TLS from the transitive feature set Tauri's updater already pulls in —
+# overriding here would force a resolver conflict.
+reqwest = { version = "0.13", features = ["json"] }
+# Advisory file locks around `.weft/context.md` writes so auto-regen
+# (user link ticket, add repo) doesn't clobber concurrent agent writes
+# to the notes block. Used via `FileExt::try_lock_exclusive` in
+# `services/task_context.rs`.
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "weft"
+path = "src/main.rs"
+
+[[bin]]
+name = "weft-cli"
+path = "src/bin/weft_cli.rs"
