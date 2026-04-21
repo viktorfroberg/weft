@@ -1,0 +1,80 @@
+name: Release
+
+# Fires on any `v*` tag push. Builds an unsigned macOS DMG on Apple
+# Silicon and attaches it to a draft GitHub Release for the tag. Since
+# weft has no Apple Developer ID yet, the .app ships without signing or
+# notarization — friends need to strip the Gatekeeper quarantine by
+# hand. The release body below spells out the command.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Escape hatch: re-run the build for an existing tag without
+  # retagging. Pick the tag from the "Run workflow" dropdown in the
+  # Actions UI — the workflow checks it out and tauri-action uploads
+  # against the matching release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0-alpha)"
+        required: true
+
+jobs:
+  build-macos:
+    name: Build macOS (Apple Silicon)
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build + upload DMG to release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.ref.outputs.tag }}
+          releaseName: "weft ${{ steps.ref.outputs.tag }}"
+          releaseBody: |
+            Unsigned pre-release build for friends testing.
+
+            **Install:**
+            1. Download `weft_*_aarch64.dmg` below.
+            2. Drag `weft.app` into `/Applications`.
+            3. Remove the Gatekeeper quarantine (needed because the binary isn't signed):
+               ```
+               xattr -d com.apple.quarantine /Applications/weft.app
+               ```
+            4. Launch normally.
+
+            **Requires:** macOS 12+, Apple Silicon.
+
+            No auto-update in this build. To upgrade, download the next release and repeat.
+          releaseDraft: true
+          prerelease: true
