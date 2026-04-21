@@ -16,6 +16,7 @@ pub enum Entity {
     WorkspaceSection,
     Settings,
     ProjectLink,
+    Preset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -54,7 +54,7 @@ weft organizes work by **task**, not by repo:
 | **[CLI](docs/cli.md)** | `weft-cli` — ops harness sharing the same SQLite. Scriptable project/task create + reconcile. |
 | **[Data layout](docs/data.md)** | Where state lives: SQLite, worktrees, Keychain, localStorage. Migration schema history. |
 | **[Development](docs/development.md)** | Build from source, tests, signing & notarization, code layout, release flow. |
-| **[Roadmap](docs/roadmap.md)** | Shipped releases and what's next. |
+| **[Roadmap](docs/roadmap.md)** | What's planned next and what's explicitly out of scope. |
 
 ---
 

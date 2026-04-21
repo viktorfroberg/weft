@@ -85,9 +85,9 @@ CREATE TABLE tasks (
   status                      TEXT NOT NULL DEFAULT 'idle',        -- idle|working|waiting|error|done
   created_at                  INTEGER NOT NULL,
   completed_at                INTEGER,
-  initial_prompt              TEXT,                                -- compose-card prompt (0006)
-  initial_prompt_consumed_at  INTEGER,                             -- set on first agent launch (0006)
-  name_locked_at              INTEGER                              -- set when user renames (0010);
+  initial_prompt              TEXT,                                -- compose-card prompt
+  initial_prompt_consumed_at  INTEGER,                             -- set on first agent launch
+  name_locked_at              INTEGER                              -- set when user renames;
                                                                     -- blocks background LLM rename
 );
 
@@ -103,7 +103,7 @@ CREATE TABLE task_worktrees (
 );
 ```
 
-Task branch name is the **single source of truth** — stored as a full string on `tasks`, never reconstructed from a prefix + slug. All path↔branch derivations read this column. The slug is globally unique (changed from per-workspace in 0002 → global in 0007/0007.x) so two tasks across different repo groups that happen to share a name won't collide on branch names.
+Task branch name is the **single source of truth** — stored as a full string on `tasks`, never reconstructed from a prefix + slug. All path↔branch derivations read this column. Slugs are globally unique so two tasks across different repo groups that happen to share a name won't collide on branch names.
 
 ### task_tickets
 
@@ -114,9 +114,9 @@ CREATE TABLE task_tickets (
   external_id      TEXT NOT NULL,                     -- e.g. "PRO-2406"
   url              TEXT NOT NULL,
   linked_at        INTEGER NOT NULL,
-  title            TEXT,                              -- cached at link time (0009)
-  status           TEXT,                              -- cached workflow state (0009)
-  title_fetched_at INTEGER,                           -- when the cache was last written (0009)
+  title            TEXT,                              -- cached at link time
+  status           TEXT,                              -- cached workflow state
+  title_fetched_at INTEGER,                           -- when the cache was last written
   PRIMARY KEY (task_id, provider, external_id)
 );
 ```
@@ -135,7 +135,7 @@ CREATE TABLE agent_presets (
   is_default                INTEGER NOT NULL DEFAULT 0,
   sort_order                INTEGER NOT NULL DEFAULT 0,
   created_at                INTEGER NOT NULL,
-  bootstrap_prompt_template TEXT,                     -- orientation text (0009)
+  bootstrap_prompt_template TEXT,                     -- orientation text for subsequent agent tabs
   bootstrap_delivery        TEXT CHECK (bootstrap_delivery IN ('argv','append_system_prompt'))
 );
 ```
@@ -191,22 +191,7 @@ Agent status events received on `localhost:17293`. Ring-buffered at 1000 rows �
 
 Persisted by Zustand's `persist` middleware. `applyInitialTheme()` in `src/main.tsx` reads this synchronously before React mounts so there's no FOUC / wrong-scheme flash on boot.
 
-## Migration history
-
-| Version | Added |
-|---|---|
-| 1 | Initial: `projects`, `workspaces`, `workspace_repos`, `tasks`, `task_worktrees` |
-| 2 | Schema polish — task `status`/`completed_at`, uniqueness constraints |
-| 3 | `agent_presets` + Claude Code seed |
-| 4 | `task_tickets` + `tasks.branch_name` as source of truth |
-| 5 | `project_links` (warm-worktree symlink/clone targets per project) |
-| 6 | `tasks.initial_prompt` + `tasks.initial_prompt_consumed_at` |
-| 7 | Claude Code preset `args_json` gains `{prompt}` token |
-| 8 | Reorder preset args: `{prompt}` BEFORE `{each_path:--add-dir}` (commander variadic eats trailing positionals) |
-| 9 | `agent_presets.bootstrap_prompt_template` + `bootstrap_delivery`; `task_tickets.title` / `status` / `title_fetched_at`; Claude args re-seeded with `--append-system-prompt {bootstrap}` |
-| 10 | `tasks.name_locked_at` — user-rename latch that blocks background LLM rename |
-
-Frontend prefs bumped 3→4 when v1.0.5 Appearance landed — no migrate fn (pre-release).
+Migrations live in `src-tauri/migrations/*.sql`, numbered in order, applied idempotently at startup via the `schema_version` table. Pre-release — no migration-history doc until v1.0.0.
 
 ## Clearing state
 

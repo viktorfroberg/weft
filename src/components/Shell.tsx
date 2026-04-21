@@ -13,12 +13,17 @@ import { TaskPanelPool } from "@/components/TaskPanelPool";
 import { usePrefs } from "@/stores/prefs";
 import { useThemeApplier } from "@/lib/theme";
 import { onMenuEvent } from "@/lib/menu";
+import { useIntegrations } from "@/stores/integrations";
 import { useProjects } from "@/stores/projects";
 import { useAllTasks } from "@/stores/tasks";
 import { useUi } from "@/stores/ui";
 import { useQueryClient } from "@tanstack/react-query";
 import { qk } from "@/query";
-import type { Task, TaskWorktree } from "@/lib/commands";
+import {
+  taskRefreshTicketTitlesIfStale,
+  type Task,
+  type TaskWorktree,
+} from "@/lib/commands";
 import { useShortcuts } from "@/lib/shortcuts";
 import { notifyTaskWaiting, setDockBadge } from "@/lib/notifications";
 import { launchDefaultAgent } from "@/lib/launch-agent";
@@ -265,6 +270,27 @@ export function Shell() {
   useEffect(() => {
     if (route.kind === "task") pushRecentTaskId(route.id);
   }, [route, pushRecentTaskId]);
+
+  // Lazy Linear ticket-title refresh. Fires when the active route
+  // becomes (or switches to) a task. Backend filters by
+  // `title_fetched_at` staleness (24h) and no-ops fast if nothing is
+  // stale, so it's safe on every route change. Lives here (not in
+  // TaskView) because `TaskPanelPool` keeps TaskView instances mounted
+  // forever — a child-level effect keyed on `task.id` would only fire
+  // once per task's lifetime in the pool, missing "come back 2 days
+  // later" refreshes.
+  const { data: integrations = [] } = useIntegrations();
+  const linearConnected = integrations.some(
+    (p) => p.id === "linear" && p.connected,
+  );
+  useEffect(() => {
+    if (route.kind !== "task") return;
+    if (!linearConnected) return;
+    void taskRefreshTicketTitlesIfStale(route.id).catch(() => {
+      // Silent — backend already logs; a failed refresh shouldn't
+      // surface as a toast every time the user opens a task.
+    });
+  }, [route, linearConnected]);
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col">

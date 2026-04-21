@@ -338,6 +338,8 @@ export const appInfo = () => invoke<AppInfo>("app_info");
 // v1.0.1 — agent presets + launch
 // ---------------------------------------------------------------------------
 
+export type BootstrapDelivery = "argv" | "append_system_prompt";
+
 export interface AgentPreset {
   id: string;
   name: string;
@@ -347,12 +349,50 @@ export interface AgentPreset {
   is_default: boolean;
   sort_order: number;
   created_at: number;
+  /** Orientation text used by `{bootstrap}` token on second-agent
+   *  launches. Null = drop `{prompt}` / `{bootstrap}` silently. */
+  bootstrap_prompt_template: string | null;
+  /** Where the bootstrap template lands in argv. Null → treated as
+   *  `argv` (portable). Claude uses `append_system_prompt`. */
+  bootstrap_delivery: BootstrapDelivery | null;
+}
+
+export interface NewAgentPresetInput {
+  name: string;
+  command: string;
+  args_json: string;
+  env_json: string;
+  sort_order?: number | null;
+  bootstrap_prompt_template?: string | null;
+  bootstrap_delivery?: BootstrapDelivery | null;
+}
+
+export interface AgentPresetPatch {
+  name: string;
+  command: string;
+  args_json: string;
+  env_json: string;
+  sort_order: number;
+  bootstrap_prompt_template: string | null;
+  bootstrap_delivery: BootstrapDelivery | null;
 }
 
 export const presetsList = () => invoke<AgentPreset[]>("presets_list");
 
 export const presetDefault = () =>
   invoke<AgentPreset | null>("preset_default");
+
+export const presetCreate = (input: NewAgentPresetInput) =>
+  invoke<AgentPreset>("preset_create", { input });
+
+export const presetUpdate = (id: string, patch: AgentPresetPatch) =>
+  invoke<AgentPreset>("preset_update", { id, patch });
+
+export const presetDelete = (id: string) =>
+  invoke<void>("preset_delete", { id });
+
+export const presetSetDefault = (id: string) =>
+  invoke<void>("preset_set_default", { id });
 
 export function agentLaunch(
   input: {
@@ -492,6 +532,12 @@ export const taskContextSet = (taskId: string, content: string) =>
  *  Wired from the "Refresh titles" button in ContextDialog. */
 export const taskRefreshTicketTitles = (taskId: string) =>
   invoke<number>("task_refresh_ticket_titles", { taskId });
+
+/** Staleness-filtered refresh used by the on-route-change trigger.
+ *  Backend short-circuits if no tickets are older than 24h, so it's
+ *  safe to call on every route change. */
+export const taskRefreshTicketTitlesIfStale = (taskId: string) =>
+  invoke<number>("task_refresh_ticket_titles_if_stale", { taskId });
 
 // ---------------------------------------------------------------------------
 // Project warm-worktree links (v1.0.6)

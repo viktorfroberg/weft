@@ -2,7 +2,7 @@
 
 weft connects to external ticketing systems so tasks can derive their branch/slug from real ticket IDs, and agents can read ticket content without manual copy-paste.
 
-**Linear** ships in v1.0.2. GitHub Issues, Jira, Notion are sibling candidates.
+**Linear** ships today. GitHub Issues, Jira, Notion are sibling candidates.
 
 ## Linear
 

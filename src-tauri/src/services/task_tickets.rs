@@ -68,6 +68,11 @@ pub fn unlink_ticket(
     Ok(event)
 }
 
+/// Default age (in seconds) past which `refresh_stale_ticket_titles`
+/// will re-hit the provider. 24h matches the user's mental model — run
+/// the app overnight, tickets you open today are fresh.
+pub const DEFAULT_STALENESS_SECS: i64 = 24 * 60 * 60;
+
 /// Re-fetch every ticket linked to this task from its provider and
 /// update the cached title/status columns. Used by the ContextDialog's
 /// "Refresh titles" button when the user suspects the upstream ticket
@@ -78,10 +83,44 @@ pub async fn refresh_ticket_titles(
     db: Arc<Mutex<Connection>>,
     task_id: String,
 ) -> Result<usize> {
+    refresh_tickets_inner(db, task_id, None).await
+}
+
+/// Staleness-filtered refresh used by the on-route-change trigger.
+/// Skips rows whose `title_fetched_at` is newer than the cutoff —
+/// returns `Ok(0)` without a Linear call or `refresh_task_context` if
+/// nothing is stale. `older_than_secs = None` means use the default
+/// window (24h).
+pub async fn refresh_stale_ticket_titles(
+    db: Arc<Mutex<Connection>>,
+    task_id: String,
+    older_than_secs: Option<i64>,
+) -> Result<usize> {
+    let window = older_than_secs.unwrap_or(DEFAULT_STALENESS_SECS);
+    refresh_tickets_inner(db, task_id, Some(window)).await
+}
+
+async fn refresh_tickets_inner(
+    db: Arc<Mutex<Connection>>,
+    task_id: String,
+    older_than_secs: Option<i64>,
+) -> Result<usize> {
+    let cutoff = older_than_secs.map(|w| unix_secs_now() - w);
     let rows = {
         let conn = db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
         TaskTicketRepo::new(&conn).list_for_task(&task_id)?
     };
+    let rows: Vec<_> = match cutoff {
+        // Stale = never-fetched OR fetched before the cutoff.
+        Some(c) => rows
+            .into_iter()
+            .filter(|r| r.title_fetched_at.map_or(true, |t| t < c))
+            .collect(),
+        None => rows,
+    };
+    if rows.is_empty() {
+        return Ok(0);
+    }
     let mut updated = 0usize;
     for row in rows {
         match enrich_one(row.provider.as_str(), row.external_id.as_str()).await {
@@ -194,4 +233,8 @@ async fn enrich_one(
 #[allow(dead_code)]
 fn _keep_task_repo_linked(conn: &Connection) {
     let _ = TaskRepo::new(conn);
+}
+
+fn unix_secs_now() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }

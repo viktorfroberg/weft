@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Bot,
   Layers,
   Palette,
   Plug,
@@ -10,6 +11,7 @@ import { appInfo, type AppInfo } from "@/lib/commands";
 import { useUi } from "@/stores/ui";
 import { AppearanceTab } from "./AppearanceTab";
 import { IntegrationsTab } from "./IntegrationsTab";
+import { PresetsTab } from "./PresetsTab";
 import { RepoGroupsTab } from "./RepoGroupsTab";
 import { WorkflowTab } from "./WorkflowTab";
 import { AdvancedTab } from "./AdvancedTab";
@@ -18,6 +20,7 @@ type Tab =
   | "appearance"
   | "repo-groups"
   | "integrations"
+  | "agents"
   | "workflow"
   | "advanced";
 
@@ -31,6 +34,7 @@ const TABS: TabMeta[] = [
   { id: "appearance", label: "Appearance", Icon: Palette },
   { id: "repo-groups", label: "Repo groups", Icon: Layers },
   { id: "integrations", label: "Integrations", Icon: Plug },
+  { id: "agents", label: "Agents", Icon: Bot },
   { id: "workflow", label: "Workflow", Icon: Sparkles },
   { id: "advanced", label: "Advanced", Icon: Wrench },
 ];
@@ -45,6 +49,7 @@ const VALID_TABS = new Set<Tab>([
   "appearance",
   "repo-groups",
   "integrations",
+  "agents",
   "workflow",
   "advanced",
 ]);
@@ -115,6 +120,7 @@ export function SettingsView() {
           {tab === "appearance" && <AppearanceTab />}
           {tab === "repo-groups" && <RepoGroupsTab />}
           {tab === "integrations" && <IntegrationsTab />}
+          {tab === "agents" && <PresetsTab />}
           {tab === "workflow" && <WorkflowTab />}
           {tab === "advanced" && <AdvancedTab info={info} />}
         </div>

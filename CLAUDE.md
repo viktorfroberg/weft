@@ -45,7 +45,7 @@ src/
 - **DB mutex scoping**: `create_task_with_worktrees` (and `task_repos`) never hold the mutex across `git` ops. 3-phase: short lock → unlocked git → short lock. Don't regress.
 - **Drag region**: full-width `Toolbar` component owns `data-tauri-drag-region`. Every interactive child MUST carry `data-tauri-drag-region="false"` or clicks get eaten. Requires `core:window:allow-start-dragging` in `capabilities/default.json`.
 - **Hook auth**: per-launch random token in `~/Library/Application Support/weft/hooks.json`. Agents POST with `Authorization: Bearer <token>`. Token is injected into terminal env as `WEFT_HOOKS_TOKEN`.
-- **Worktree path convention**: `~/.weft/worktrees/<task-slug>/<project-name>/`. Branch: `weft/<slug>` (default) or `feature/<ticket-ids>` when created from Linear tickets. Slug is **globally unique** since v1.0.7.
+- **Worktree path convention**: `~/.weft/worktrees/<task-slug>/<project-name>/`. Branch: `weft/<slug>` (default) or `feature/<ticket-ids>` when created from Linear tickets. Slug is **globally unique**.
 - **Task-root CLAUDE.md** at `~/.weft/worktrees/<slug>/CLAUDE.md` (one level ABOVE repo checkouts) is picked up by Claude's memory walk-up. This is intentional; do not move it inside the worktree or it'll collide with the repo's own CLAUDE.md.
 - **`.weft/` is in the common `info/exclude`**, so `git add -A` doesn't stage our sidecars. Do not undo this.
 - **`--add-dir` is variadic**: commander.js eats every trailing non-flag arg. Keep `{prompt}` (or any other positional) BEFORE `{each_path:--add-dir}` in `args_json`. Migration 0008 exists because we got this wrong the first time.

@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Filter, Plus, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Filter, Loader2, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useProjects } from "@/stores/projects";
 import { useAllTasksFlat, useTaskProjectIds } from "@/stores/tasks";
+import { useChanges } from "@/stores/changes";
+import { useTerminalTabs } from "@/stores/terminal_tabs";
+import { usePtyExits } from "@/stores/pty_exits";
 import { useIntegrations } from "@/stores/integrations";
 import {
   useActiveRoute,
@@ -18,9 +21,12 @@ import {
   type TaskTicketRow,
 } from "@/lib/commands";
 import { qk } from "@/query";
+import { formatAbsolute, formatRelativeShort } from "@/lib/relative-time";
 import { ProjectBadge } from "./ProjectBadge";
 import { TaskStatusDot } from "./ui/task-status-dot";
 import { AddProjectDialog } from "./AddProjectDialog";
+
+const EMPTY_TABS: never[] = [];
 
 const EMPTY_LINKS: never[] = [];
 
@@ -466,6 +472,41 @@ function TaskRow({
   const { data: projects = [] } = useProjects();
   const isActive = activeRoute.kind === "task" && activeRoute.id === task.id;
 
+  // Diff count surface. Skip the query for `idle` and `done` rows —
+  // they're either pre-work or shipped, neither has a meaningful
+  // dirty count, and `task_changes_by_repo` shells `git diff` per
+  // worktree which we don't want to fan out across every row in the
+  // sidebar. The active task already keeps this query warm via
+  // ChangesPanel; we share its cache here.
+  const dirtyEnabled =
+    task.status === "working" ||
+    task.status === "waiting" ||
+    task.status === "error";
+  const { data: repoChanges } = useChanges(dirtyEnabled ? task.id : "");
+  const dirtyCount = useMemo(() => {
+    if (!repoChanges) return 0;
+    let n = 0;
+    for (const r of repoChanges) n += r.changes.length;
+    return n;
+  }, [repoChanges]);
+
+  // Live agent indicator. A task counts as "agent live" when any of
+  // its terminal tabs is an `agent`-kind with a sessionId that has
+  // NOT yet recorded a `pty_exit`. Idle/done tasks short-circuit so
+  // the lookup stays cheap.
+  const tabs = useTerminalTabs((s) => s.byTaskId[task.id] ?? EMPTY_TABS);
+  const exitsBySessionId = usePtyExits((s) => s.bySessionId);
+  const agentLive = useMemo(
+    () =>
+      tabs.some(
+        (t) =>
+          t.kind === "agent" &&
+          !!t.sessionId &&
+          !exitsBySessionId[t.sessionId],
+      ),
+    [tabs, exitsBySessionId],
+  );
+
   // Hide tasks that don't touch any of the filtered projects.
   if (filterProjects.size > 0) {
     const anyMatch = taskProjectIds.some((id) => filterProjects.has(id));
@@ -478,12 +519,19 @@ function TaskRow({
   // absent; harmless on every modern row.
   const branch = task.branch_name ?? `weft/${task.id.slice(0, 8)}`;
 
+  // Relative-time stamp: prefer `completed_at` for done tasks (they
+  // shipped at that moment), fall back to `created_at`. A future
+  // `updated_at` column would replace both — see roadmap.
+  const stampAt = task.completed_at ?? task.created_at;
+  const stampShort = formatRelativeShort(stampAt);
+  const stampAbsolute = formatAbsolute(stampAt);
+
   return (
     <li>
       <button
         type="button"
         onClick={() => navigate({ kind: "task", id: task.id })}
-        title={`${task.name}\n${branch}${tickets.length ? `\n${tickets.join(", ")}` : ""}`}
+        title={`${task.name}\n${branch}${tickets.length ? `\n${tickets.join(", ")}` : ""}\n${stampAbsolute}`}
         className={`flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left text-xs transition-colors ${
           isActive
             ? "bg-sidebar-accent text-sidebar-accent-foreground"
@@ -492,6 +540,17 @@ function TaskRow({
       >
         <div className="flex items-center gap-2">
           <TaskStatusDot status={task.status} size="xs" pulse />
+          {/* Live-agent affordance — a tiny spinner that only renders
+              while a non-exited agent PTY is attached to this task.
+              Adjacent to the status dot so the eye groups them as one
+              "what's happening?" cluster. */}
+          {agentLive && (
+            <Loader2
+              size={9}
+              className="text-emerald-500 shrink-0 animate-spin"
+              aria-label="Agent running"
+            />
+          )}
           <span className="flex-1 truncate">{task.name}</span>
           <span className="flex shrink-0 items-center gap-0.5">
             {taskProjectIds.slice(0, 4).map((pid) => {
@@ -514,17 +573,34 @@ function TaskRow({
             )}
           </span>
         </div>
-        {/* Sub-line: branch + ticket IDs. Indented to clear the status
-            dot above so the branch starts at the same x as the task name.
-            Uses min-w-0 + truncate so a long branch never blows out the
-            sidebar width. */}
+        {/* Sub-line: branch + ticket IDs + diff count + relative time.
+            Indented to clear the status dot above so the branch starts
+            at the same x as the task name. min-w-0 + truncate so a long
+            branch never blows out the sidebar width; the right-aligned
+            chips stay anchored even when the branch overflows. */}
         <div className="text-muted-foreground/80 flex min-w-0 items-center gap-1.5 pl-3.5 text-[10px]">
-          <span className="truncate font-mono">{branch}</span>
+          <span className="min-w-0 truncate font-mono">{branch}</span>
           {tickets.length > 0 && (
             <span className="bg-muted/60 text-muted-foreground shrink-0 rounded px-1 py-px font-mono text-[9px]">
               {tickets.length === 1 ? tickets[0] : `${tickets[0]} +${tickets.length - 1}`}
             </span>
           )}
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            {dirtyCount > 0 && (
+              <span
+                className="text-foreground/70 font-mono text-[9px]"
+                title={`${dirtyCount} uncommitted file${dirtyCount === 1 ? "" : "s"}`}
+              >
+                {dirtyCount}∙
+              </span>
+            )}
+            <span
+              className="text-muted-foreground/70 tabular-nums text-[10px]"
+              title={stampAbsolute}
+            >
+              {stampShort}
+            </span>
+          </span>
         </div>
       </button>
     </li>

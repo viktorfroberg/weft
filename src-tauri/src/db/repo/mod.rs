@@ -16,7 +16,7 @@ pub mod workspace;
 #[cfg(test)]
 mod tests;
 
-pub use preset::{AgentPreset, BootstrapDelivery, PresetRepo};
+pub use preset::{AgentPreset, BootstrapDelivery, NewAgentPreset, PresetPatch, PresetRepo};
 pub use project::{NewProject, ProjectRepo};
 pub use project_link::{LinkType, ProjectLinkInput, ProjectLinkRepo, ProjectLinkRow};
 pub use task::{NewTask, TaskRepo};

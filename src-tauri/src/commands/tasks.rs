@@ -425,6 +425,34 @@ pub async fn task_refresh_ticket_titles(
     Ok(updated)
 }
 
+/// Fire-once refresh triggered when a task route becomes active. Backend
+/// filters by `title_fetched_at` staleness (default 24h) and short-
+/// circuits with zero Linear calls if nothing is stale — safe to call on
+/// every route change. Emits the task-update event only when at least
+/// one ticket actually refreshed.
+#[tauri::command]
+pub async fn task_refresh_ticket_titles_if_stale(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<usize, String> {
+    crate::timed!("task_refresh_ticket_titles_if_stale");
+    let updated = task_tickets::refresh_stale_ticket_titles(
+        std::sync::Arc::clone(&state.db),
+        task_id.clone(),
+        None,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if updated > 0 {
+        super::emit_event(
+            &app,
+            crate::db::events::DbEvent::update(crate::db::events::Entity::Task, task_id),
+        );
+    }
+    Ok(updated)
+}
+
 #[tauri::command]
 pub fn task_unlink_ticket(
     app: AppHandle,

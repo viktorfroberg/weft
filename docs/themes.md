@@ -147,7 +147,7 @@ Terminal.tsx hardcodes these — they're safe universal values, not personality 
 ```ts
 letterSpacing: 0,
 minimumContrastRatio: 4.5,   // a11y floor — imports with pathological base05 lift against base00
-allowTransparency: false,    // v1.0.5 doesn't do opacity (deferred to a future NSVisualEffectView phase)
+allowTransparency: false,    // no opacity today (deferred to a future NSVisualEffectView phase)
 scrollback: 5000,
 ```
 

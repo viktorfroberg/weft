@@ -30,13 +30,29 @@ export function InlineTaskRename({ task, className, selectable = true }: Props) 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.name);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const taskIdRef = useRef(task.id);
+  // Which task.id the current edit session began on. Checked at commit
+  // time so a blur fired *after* the prop swapped to a different task
+  // (TaskView is kept mounted across route changes by the panel pool)
+  // doesn't write the old task's draft onto the new task.
+  const editStartedForRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // Whenever an upstream rename lands (background LLM, another
-    // window, manual rename from the sidebar) refresh the non-editing
-    // display so we don't strand a stale draft.
-    if (!editing) setDraft(task.name);
-  }, [task.name, editing]);
+    const idChanged = taskIdRef.current !== task.id;
+    taskIdRef.current = task.id;
+    if (idChanged) {
+      // Task identity swap while this instance was reused. Drop any
+      // in-flight edit so the pending blur→commit doesn't fire against
+      // the new task, and resync the display to the new name.
+      editStartedForRef.current = null;
+      setEditing(false);
+      setDraft(task.name);
+    } else if (!editing) {
+      // Same task, upstream rename landed (background LLM, another
+      // window) — refresh the non-editing display.
+      setDraft(task.name);
+    }
+  }, [task.id, task.name, editing]);
 
   useEffect(() => {
     if (editing) {
@@ -48,8 +64,15 @@ export function InlineTaskRename({ task, className, selectable = true }: Props) 
   }, [editing]);
 
   const commit = async () => {
-    const next = draft.trim();
+    const startedFor = editStartedForRef.current;
+    editStartedForRef.current = null;
     setEditing(false);
+    // Blur landing after a task swap — discard.
+    if (!startedFor || startedFor !== task.id) {
+      setDraft(task.name);
+      return;
+    }
+    const next = draft.trim();
     if (!next || next === task.name) {
       setDraft(task.name);
       return;
@@ -67,6 +90,7 @@ export function InlineTaskRename({ task, className, selectable = true }: Props) 
       <span
         data-tauri-drag-region="false"
         onDoubleClick={() => {
+          editStartedForRef.current = task.id;
           setDraft(task.name);
           setEditing(true);
         }}
@@ -77,6 +101,16 @@ export function InlineTaskRename({ task, className, selectable = true }: Props) 
       </span>
     );
   }
+
+  // Input mode strips `truncate` from the caller's className. On a
+  // <span> truncate works as expected; on an <input> it collapses the
+  // element toward its intrinsic size and clips the caret. Defending
+  // here means callers can keep their read-state truncate without
+  // worrying about it leaking into edit mode. `w-full` then lets the
+  // input fill its flex slot.
+  const inputClassName = `${(className ?? "")
+    .replace(/\btruncate\b/g, "")
+    .trim()} bg-transparent border-b border-foreground/30 focus:border-foreground/60 outline-none w-full`;
 
   return (
     <input
@@ -91,11 +125,12 @@ export function InlineTaskRename({ task, className, selectable = true }: Props) 
           void commit();
         } else if (e.key === "Escape") {
           e.preventDefault();
+          editStartedForRef.current = null;
           setDraft(task.name);
           setEditing(false);
         }
       }}
-      className={`${className ?? ""} bg-transparent border-b border-foreground/30 focus:border-foreground/60 outline-none min-w-0`}
+      className={inputClassName}
     />
   );
 }

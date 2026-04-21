@@ -61,6 +61,10 @@ export function DbEventBridge() {
       if (has("project_link")) {
         void qc.invalidateQueries({ queryKey: qk.projectLinksAll() });
       }
+      if (has("preset")) {
+        void qc.invalidateQueries({ queryKey: qk.agentPresets() });
+        void qc.invalidateQueries({ queryKey: qk.presetDefault() });
+      }
     };
 
     const unlisten = onDbEvent((e) => {

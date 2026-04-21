@@ -11,7 +11,8 @@ export type Entity =
   | "task_worktree"
   | "workspace_section"
   | "settings"
-  | "project_link";
+  | "project_link"
+  | "preset";
 
 export type Op = "insert" | "update" | "delete";
 

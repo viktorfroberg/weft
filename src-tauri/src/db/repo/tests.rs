@@ -4,7 +4,7 @@
 //! but keeping the end-to-end flows in one place makes multi-repo (workspace +
 //! projects + junction) scenarios easier to read.
 
-use super::{NewProject, NewTask, NewWorkspace, NewWorkspaceRepo, ProjectRepo, TaskRepo, WorkspaceRepoRepo, WorkspacesRepo};
+use super::{NewAgentPreset, NewProject, NewTask, NewWorkspace, NewWorkspaceRepo, PresetPatch, PresetRepo, ProjectRepo, TaskRepo, WorkspaceRepoRepo, WorkspacesRepo};
 use crate::db::events::{Entity, Op};
 use rusqlite::Connection;
 
@@ -228,4 +228,186 @@ fn task_rejects_empty_slug_from_symbols_only_name() {
         })
         .unwrap_err();
     assert!(err.to_string().contains("empty slug"));
+}
+
+// ---- Agent preset CRUD ----
+
+fn mk_preset_db() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    for sql in [
+        include_str!("../../../migrations/0001_init.sql"),
+        include_str!("../../../migrations/0002_schema.sql"),
+        include_str!("../../../migrations/0003_agent_presets.sql"),
+        include_str!("../../../migrations/0004_task_tickets_and_branch.sql"),
+        include_str!("../../../migrations/0007_claude_preset_prompt_arg.sql"),
+        include_str!("../../../migrations/0008_claude_preset_prompt_before_addir.sql"),
+        include_str!("../../../migrations/0009_task_context_shared.sql"),
+    ] {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn
+}
+
+fn new_toy(name: &str) -> NewAgentPreset {
+    NewAgentPreset {
+        name: name.into(),
+        command: "echo".into(),
+        args_json: "[\"hi\"]".into(),
+        env_json: "{}".into(),
+        sort_order: None,
+        bootstrap_prompt_template: None,
+        bootstrap_delivery: None,
+    }
+}
+
+fn toy_patch(name: &str) -> PresetPatch {
+    PresetPatch {
+        name: name.into(),
+        command: "echo".into(),
+        args_json: "[\"hi\"]".into(),
+        env_json: "{}".into(),
+        sort_order: 1,
+        bootstrap_prompt_template: None,
+        bootstrap_delivery: None,
+    }
+}
+
+#[test]
+fn preset_create_list_contains_seed_plus_new() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    let (p, ev) = repo.insert(new_toy("Toy")).unwrap();
+    assert_eq!(ev.entity, Entity::Preset);
+    assert_eq!(ev.op, Op::Insert);
+    assert_eq!(p.name, "Toy");
+    let list = repo.list().unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().any(|p| p.name == "Claude Code"));
+    assert!(list.iter().any(|p| p.name == "Toy"));
+}
+
+#[test]
+fn preset_create_rejects_malformed_args_json() {
+    let conn = mk_preset_db();
+    let mut bad = new_toy("Bad");
+    bad.args_json = "[not json".into();
+    let err = PresetRepo::new(&conn).insert(bad).unwrap_err();
+    assert!(err.to_string().contains("args must be a JSON array"));
+}
+
+#[test]
+fn preset_create_rejects_malformed_env_json() {
+    let conn = mk_preset_db();
+    let mut bad = new_toy("Bad");
+    bad.env_json = "[]".into();
+    let err = PresetRepo::new(&conn).insert(bad).unwrap_err();
+    assert!(err.to_string().contains("env must be a JSON object"));
+}
+
+#[test]
+fn preset_update_roundtrips_and_rejects_unknown() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    let (p, _) = repo.insert(new_toy("Toy")).unwrap();
+    let (updated, ev) = repo.update(&p.id, toy_patch("Toy Renamed")).unwrap();
+    assert_eq!(updated.name, "Toy Renamed");
+    assert_eq!(ev.op, Op::Update);
+
+    let err = repo
+        .update("does-not-exist", toy_patch("nope"))
+        .unwrap_err();
+    assert!(err.to_string().contains("preset not found"));
+}
+
+#[test]
+fn preset_set_default_promotes_exactly_one() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    let (toy, _) = repo.insert(new_toy("Toy")).unwrap();
+    repo.set_default(&toy.id).unwrap();
+
+    let defaults: Vec<_> = repo
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.is_default)
+        .collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].id, toy.id);
+}
+
+#[test]
+fn preset_set_default_on_missing_id_rejects_and_leaves_existing_default() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    // Seed row has is_default = 1. A bogus set_default should not wipe it.
+    let err = repo.set_default("does-not-exist").unwrap_err();
+    assert!(err.to_string().contains("preset not found"));
+    let defaults: Vec<_> = repo
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.is_default)
+        .collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].name, "Claude Code");
+}
+
+#[test]
+fn preset_delete_rejects_last_row() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    // Seed is the only row.
+    let seed = repo
+        .list()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let err = repo.delete(&seed.id).unwrap_err();
+    assert!(err.to_string().contains("cannot delete the only"));
+    // Row still there.
+    assert_eq!(repo.list().unwrap().len(), 1);
+}
+
+#[test]
+fn preset_delete_of_default_promotes_next() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    let (toy, _) = repo.insert(new_toy("Toy")).unwrap();
+    let seed_id = repo
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.name == "Claude Code")
+        .unwrap()
+        .id;
+
+    // Seed is currently default. Deleting it should promote Toy.
+    let ev = repo.delete(&seed_id).unwrap();
+    assert_eq!(ev.op, Op::Delete);
+
+    let defaults: Vec<_> = repo
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.is_default)
+        .collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].id, toy.id);
+
+    // And get_default() agrees.
+    let d = repo.get_default().unwrap().unwrap();
+    assert_eq!(d.id, toy.id);
+}
+
+#[test]
+fn preset_delete_nondefault_leaves_default_alone() {
+    let conn = mk_preset_db();
+    let repo = PresetRepo::new(&conn);
+    let (toy, _) = repo.insert(new_toy("Toy")).unwrap();
+    repo.delete(&toy.id).unwrap();
+    let d = repo.get_default().unwrap().unwrap();
+    assert_eq!(d.name, "Claude Code");
 }

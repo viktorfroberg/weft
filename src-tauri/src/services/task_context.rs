@@ -533,6 +533,96 @@ pub fn compose_first_turn(
     Ok(Some(out.trim_end().to_string()))
 }
 
+/// Append a timestamped note to the `weft:notes` block of the primary
+/// worktree's `.weft/context.md`. Used by the hook-server endpoint that
+/// lets agents drop structured notes without hand-editing the file (and
+/// racing the fence splicer). Single-target write by design: other
+/// worktrees' notes can diverge, so blasting the same append to every
+/// worktree would clobber per-worktree edits. Peers reconverge on the
+/// next user save via `write_task_context`.
+///
+/// The "Agent notes" subheading is managed line-by-line: existing exact
+/// matches of `## Agent notes` on their own line are reused; otherwise
+/// a fresh heading is appended. User-authored variants (`### Agent notes`,
+/// indented, etc.) are left alone — weft creates its own heading below.
+pub fn append_note(
+    db: &Arc<Mutex<Connection>>,
+    task_id: &str,
+    note: &str,
+) -> Result<()> {
+    let note = note.trim();
+    if note.is_empty() {
+        return Err(anyhow!("note cannot be empty"));
+    }
+
+    let primary = {
+        let conn = db.lock().map_err(|_| anyhow!("db lock poisoned"))?;
+        let wts = TaskWorktreeRepo::new(&conn).list_for_task(task_id)?;
+        if TaskRepo::new(&conn).get(task_id)?.is_none() {
+            return Err(anyhow!("task not found"));
+        }
+        wts.into_iter()
+            .find(|w| w.status == "ready")
+            .map(|w| PathBuf::from(w.worktree_path))
+    };
+    let Some(wt_path) = primary else {
+        return Err(anyhow!("no ready worktrees for task"));
+    };
+    let path = wt_path.join(".weft").join(CONTEXT_FILENAME);
+
+    let existing = read_existing_with_lock(&path)?.unwrap_or_default();
+    let (auto, notes) = match parse_sections(&existing) {
+        ParsedSections::Parsed { auto, notes } => (auto, notes),
+        ParsedSections::LegacyAllNotes { notes } => (String::new(), notes),
+        ParsedSections::Empty => (String::new(), String::new()),
+        ParsedSections::Quarantine { .. } => {
+            // Defer repair to the main `refresh_task_context` path —
+            // don't quarantine-on-append, because we don't own the auto
+            // block's authoritative content here.
+            return Err(anyhow!(
+                "context.md is malformed — trigger a task refresh first"
+            ));
+        }
+    };
+
+    let timestamp = iso8601_utc_now();
+    let entry = format!("- {timestamp} — {note}");
+    let new_notes = splice_agent_note(&notes, &entry);
+
+    let body = render_sidecar(&auto, &new_notes);
+    atomic_write_with_lock(&path, body.as_bytes())
+}
+
+/// Append an entry to the notes body under a `## Agent notes` heading.
+/// Detection is line-anchored (exact `## Agent notes` line). If the
+/// heading is absent, a fresh one is added at the end — always at the
+/// bottom, so we never reorder existing content.
+fn splice_agent_note(notes: &str, entry: &str) -> String {
+    let trimmed = notes.trim_end_matches('\n');
+    let has_heading = trimmed
+        .lines()
+        .any(|line| line == "## Agent notes");
+    if has_heading {
+        if trimmed.is_empty() {
+            // Shouldn't happen (has_heading implies non-empty) but be
+            // defensive against weird splits.
+            return format!("## Agent notes\n\n{entry}");
+        }
+        format!("{trimmed}\n{entry}")
+    } else if trimmed.is_empty() {
+        format!("## Agent notes\n\n{entry}")
+    } else {
+        format!("{trimmed}\n\n## Agent notes\n\n{entry}")
+    }
+}
+
+fn iso8601_utc_now() -> String {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
+}
+
 /// Backwards-compatible read. Returns the file contents as-is from the
 /// primary worktree — the ContextDialog then parses sections to show
 /// the user the auto preview + editable notes.
@@ -820,5 +910,209 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    // ---- Agent notes append splice helper ----
+
+    #[test]
+    fn splice_agent_note_on_empty_notes_adds_heading() {
+        let out = splice_agent_note("", "- 2026-04-21T00:00:00Z — hello");
+        assert!(out.starts_with("## Agent notes\n\n- 2026-04-21T00:00:00Z — hello"));
+    }
+
+    #[test]
+    fn splice_agent_note_appends_under_existing_heading_no_duplicate() {
+        let existing = "## Agent notes\n\n- a earlier line";
+        let out = splice_agent_note(existing, "- later line");
+        let heading_count = out.matches("## Agent notes").count();
+        assert_eq!(heading_count, 1, "should not duplicate heading:\n{out}");
+        assert!(out.ends_with("- later line"));
+        assert!(out.contains("- a earlier line"));
+    }
+
+    #[test]
+    fn splice_agent_note_preserves_user_authored_content_above() {
+        let existing = "User scratch notes go here.\n\nStill more user stuff.";
+        let out = splice_agent_note(existing, "- entry 1");
+        assert!(out.starts_with("User scratch notes go here."));
+        assert!(out.contains("## Agent notes"));
+        assert!(out.trim_end().ends_with("- entry 1"));
+    }
+
+    #[test]
+    fn splice_agent_note_ignores_variant_user_headings() {
+        // `### Agent notes` is NOT the weft-managed heading — we still
+        // create our own `## Agent notes` section below.
+        let existing = "### Agent notes\n- user's custom entry";
+        let out = splice_agent_note(existing, "- weft entry");
+        let h2_count = out.matches("## Agent notes").count();
+        // `### Agent notes` contains `## Agent notes` as a substring, but
+        // we check anchored line match — so only one "## Agent notes"
+        // line should appear.
+        let anchored: usize = out
+            .lines()
+            .filter(|l| *l == "## Agent notes")
+            .count();
+        assert_eq!(
+            anchored, 1,
+            "exactly one exact-match `## Agent notes` line expected (h2_count={h2_count}):\n{out}"
+        );
+    }
+
+    #[test]
+    fn append_note_writes_primary_worktree_only() {
+        use crate::db::repo::{
+            NewProject, NewTask, NewTaskWorktree, ProjectRepo, TaskRepo, TaskWorktreeRepo,
+        };
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in [
+            include_str!("../../migrations/0001_init.sql"),
+            include_str!("../../migrations/0002_schema.sql"),
+            include_str!("../../migrations/0004_task_tickets_and_branch.sql"),
+            include_str!("../../migrations/0006_initial_prompt.sql"),
+            include_str!("../../migrations/0010_task_name_locked_at.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+
+        // Two ready worktrees — only the first should get the append.
+        let dir = tempfile::tempdir().unwrap();
+        let wt_a = dir.path().join("repo-a");
+        let wt_b = dir.path().join("repo-b");
+        fs::create_dir_all(wt_a.join(".weft")).unwrap();
+        fs::create_dir_all(wt_b.join(".weft")).unwrap();
+
+        let project_a_id;
+        let project_b_id;
+        let task_id;
+        {
+            let (p_a, _) = ProjectRepo::new(&conn)
+                .insert(NewProject {
+                    name: "a".into(),
+                    main_repo_path: wt_a.to_string_lossy().into(),
+                    default_branch: "main".into(),
+                    color: None,
+                })
+                .unwrap();
+            let (p_b, _) = ProjectRepo::new(&conn)
+                .insert(NewProject {
+                    name: "b".into(),
+                    main_repo_path: wt_b.to_string_lossy().into(),
+                    default_branch: "main".into(),
+                    color: None,
+                })
+                .unwrap();
+            project_a_id = p_a.id;
+            project_b_id = p_b.id;
+            let (task, _) = TaskRepo::new(&conn)
+                .insert(NewTask {
+                    workspace_id: None,
+                    name: "t".into(),
+                    agent_preset: None,
+                    initial_prompt: None,
+                })
+                .unwrap();
+            task_id = task.id.clone();
+            TaskWorktreeRepo::new(&conn)
+                .insert(NewTaskWorktree {
+                    task_id: task.id.clone(),
+                    project_id: project_a_id.clone(),
+                    worktree_path: wt_a.to_string_lossy().into(),
+                    task_branch: "weft/t".into(),
+                    base_branch: "main".into(),
+                    status: "ready".into(),
+                })
+                .unwrap();
+            TaskWorktreeRepo::new(&conn)
+                .insert(NewTaskWorktree {
+                    task_id: task.id,
+                    project_id: project_b_id,
+                    worktree_path: wt_b.to_string_lossy().into(),
+                    task_branch: "weft/t".into(),
+                    base_branch: "main".into(),
+                    status: "ready".into(),
+                })
+                .unwrap();
+        }
+        let _ = project_a_id;
+
+        let db = Arc::new(Mutex::new(conn));
+
+        // Seed the primary sidecar with some existing content so we
+        // cover the splice-into-existing path.
+        let seed = render_sidecar("# t", "");
+        fs::write(wt_a.join(".weft").join(CONTEXT_FILENAME), seed).unwrap();
+
+        append_note(&db, &task_id, "first thought").unwrap();
+        append_note(&db, &task_id, "second thought").unwrap();
+
+        let a_body = fs::read_to_string(wt_a.join(".weft").join(CONTEXT_FILENAME)).unwrap();
+        // One heading, both lines present.
+        let heading_lines: usize = a_body
+            .lines()
+            .filter(|l| *l == "## Agent notes")
+            .count();
+        assert_eq!(heading_lines, 1, "body:\n{a_body}");
+        assert!(a_body.contains("— first thought"));
+        assert!(a_body.contains("— second thought"));
+
+        // Second worktree was never touched.
+        let b_path = wt_b.join(".weft").join(CONTEXT_FILENAME);
+        assert!(!b_path.exists(), "peer worktree should not be written");
+    }
+
+    #[test]
+    fn append_note_rejects_empty_note() {
+        use crate::db::repo::{NewTask, TaskRepo};
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in [
+            include_str!("../../migrations/0001_init.sql"),
+            include_str!("../../migrations/0002_schema.sql"),
+            include_str!("../../migrations/0004_task_tickets_and_branch.sql"),
+            include_str!("../../migrations/0006_initial_prompt.sql"),
+            include_str!("../../migrations/0010_task_name_locked_at.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        let (task, _) = TaskRepo::new(&conn)
+            .insert(NewTask {
+                workspace_id: None,
+                name: "t".into(),
+                agent_preset: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let err = append_note(&db, &task.id, "   ").unwrap_err();
+        assert!(err.to_string().contains("note cannot be empty"));
+    }
+
+    #[test]
+    fn append_note_errors_on_missing_task() {
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for sql in [
+            include_str!("../../migrations/0001_init.sql"),
+            include_str!("../../migrations/0002_schema.sql"),
+            include_str!("../../migrations/0004_task_tickets_and_branch.sql"),
+            include_str!("../../migrations/0006_initial_prompt.sql"),
+            include_str!("../../migrations/0010_task_name_locked_at.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        let db = Arc::new(Mutex::new(conn));
+        let err = append_note(&db, "does-not-exist", "x").unwrap_err();
+        assert!(err.to_string().contains("task not found"));
     }
 }

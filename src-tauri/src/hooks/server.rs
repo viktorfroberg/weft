@@ -110,6 +110,7 @@ pub async fn start_server(mut ctx: AppCtx) -> Result<HookServerHandle> {
         .route("/healthz", axum::routing::get(healthz))
         .route("/v1/events", post(ingest_event))
         .route("/v1/install-lock", post(install_lock))
+        .route("/v1/task_context_append", post(append_context_note))
         .with_state(ctx);
 
     let join = tokio::spawn(async move {
@@ -130,6 +131,16 @@ fn token_ok(headers: &HeaderMap, expected: &str) -> bool {
     if expected.is_empty() {
         return true;
     }
+    token_ok_strict(headers, expected)
+}
+
+/// Like `token_ok` but never honors the empty-expected dev bypass.
+/// Used by mutating endpoints that write to disk — losing a status
+/// event in dev is annoying, corrupting `.weft/context.md` isn't.
+fn token_ok_strict(headers: &HeaderMap, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
     let Some(auth) = headers.get("authorization") else {
         return false;
     };
@@ -141,7 +152,6 @@ fn token_ok(headers: &HeaderMap, expected: &str) -> bool {
         return false;
     }
     let supplied = &value[prefix.len()..];
-    // Constant-time compare to avoid timing oracles — cheap and correct.
     if supplied.len() != expected.len() {
         return false;
     }
@@ -214,6 +224,73 @@ async fn ingest_event(
             "changed": result.changed,
         })),
     )
+}
+
+/// Max body for a single appended note. 4 KiB is comfortable for
+/// status updates / short paragraphs; larger payloads suggest the
+/// caller should be editing the notes block via ContextDialog, not
+/// firing discrete HTTP notes.
+const MAX_NOTE_LEN: usize = 4096;
+
+#[derive(serde::Deserialize)]
+struct AppendNoteReq {
+    task_id: String,
+    note: String,
+}
+
+async fn append_context_note(
+    State(ctx): State<AppCtx>,
+    headers: HeaderMap,
+    Json(req): Json<AppendNoteReq>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if !token_ok_strict(&headers, &ctx.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid token"})),
+        );
+    }
+    if req.task_id.trim().is_empty() || req.note.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "task_id and note are required"})),
+        );
+    }
+    if req.note.len() > MAX_NOTE_LEN {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!("note exceeds {MAX_NOTE_LEN}-byte cap")
+            })),
+        );
+    }
+
+    match crate::services::task_context::append_note(&ctx.db, &req.task_id, &req.note) {
+        Ok(()) => {
+            if let Some(app) = ctx.app.as_ref() {
+                let ev = DbEvent::update(Entity::Task, req.task_id.clone());
+                if let Err(e) = app.emit(DB_EVENT_CHANNEL, &ev) {
+                    tracing::warn!(error = %e, "task_context_append: emit db_event failed");
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"appended": true})),
+            )
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // Crude mapping — the service uses `anyhow!` strings.
+            let status = if msg.contains("task not found") {
+                StatusCode::NOT_FOUND
+            } else if msg.contains("no ready worktrees") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::warn!(task = %req.task_id, error = %msg, "task_context_append failed");
+            (status, Json(serde_json::json!({"error": msg})))
+        }
+    }
 }
 
 async fn install_lock(
