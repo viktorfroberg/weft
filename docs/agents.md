@@ -14,7 +14,7 @@ Tasks auto-spawn the default agent on create — the compose card's prompt becom
 
 ## Preset templates
 
-Presets live in the `agent_presets` SQLite table (seeded at first boot) and are resolved at launch time by `src-tauri/src/services/agent_launch.rs`.
+Presets live in the `agent_presets` SQLite table (seeded at first boot), are editable from **Settings → Agents**, and are resolved at launch time by `src-tauri/src/services/agent_launch.rs`.
 
 A preset has:
 
@@ -119,6 +119,22 @@ Requests without the correct token get `401`. Token compromise scope: until next
 
 Any `detail` payload you send is stored alongside the event in the `StatusStore`; not surfaced in v1 but available for later.
 
+### Appending notes to `.weft/context.md`
+
+Agents that want to drop structured notes in the shared brief should post to `/v1/task_context_append` instead of editing the file directly — hand-edits race the fence splicer. weft handles locking, timestamps the entry, and slots it under a `## Agent notes` subsection in the `weft:notes` block of the primary worktree's sidecar.
+
+```bash
+curl -sX POST "http://127.0.0.1:$(cat ~/Library/Application\ Support/weft/hooks.port)/v1/task_context_append" \
+  -H "Authorization: Bearer $WEFT_HOOKS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"task_id\":\"$WEFT_TASK_ID\",\"note\":\"Tried approach X, couldn't reproduce the bug without a real DB.\"}"
+```
+
+- Payload: `{ "task_id": "...", "note": "markdown string" }`. Bearer is strict here — no empty-token dev bypass.
+- Max note length: 4 KiB (413 past that).
+- Responses: `200 { appended: true }`, `401` bad token, `404` unknown task, `409` no ready worktrees.
+- Write target: primary (first-ready) worktree only. Peer worktrees converge on the next ContextDialog save.
+
 ## Wiring Claude Code's native hook system
 
 Claude Code has its own tool/session hooks (see the [Claude Code docs](https://docs.claude.com/claude-code/hooks)). To forward them to weft, configure your `~/.claude/settings.json` (or project-local `.claude/settings.json`) to `curl` the events:
@@ -154,33 +170,18 @@ The env vars are already in the PTY. `curl -s` keeps noise off your terminal out
 
 ## Adding a new agent
 
-The data model supports more presets; the UI for preset CRUD is deferred (edit via SQLite for now). To add e.g. Codex:
+Open **Settings → Agents → New preset**. Fill in:
 
-```bash
-sqlite3 ~/Library/Application\ Support/weft/weft.db <<'SQL'
-INSERT INTO agent_presets
-  (id, name, command, args_json, env_json, is_default, sort_order, created_at,
-   bootstrap_prompt_template, bootstrap_delivery)
-VALUES (
-  'codex',
-  'Codex',
-  'codex',
-  '["{prompt}", "{each_path:--path}"]',
-  '{}',
-  0,
-  10,
-  strftime('%s','now')*1000,
-  'You have joined a weft task in progress. A shared brief for this task is in `.weft/context.md` at the root of the repo worktree you are running in. Read it, then wait for my instructions.',
-  'argv'
-);
-SQL
-```
+- **Name** — label shown in the ⌘T picker and Launch menu (e.g. "Codex").
+- **Command** — the binary, e.g. `codex`.
+- **Args** — a JSON array of template strings. Use the placeholders listed above (`{slug}`, `{prompt}`, `{each_path:<flag>}`, `{bootstrap}`, …).
+- **Env** — a JSON object of string→string env vars. Values are masked in the dialog by default; click **Reveal** to edit.
+- **Bootstrap prompt template** (optional) — orientation text for second-agent launches, when the task's `initial_prompt` is already consumed.
+- **Bootstrap delivery** — `argv` (portable, slots into `{bootstrap}`) or `append_system_prompt` (Claude-only, keeps the orientation out of the visible transcript).
 
-Restart weft. The preset shows up in the ⌘T picker and the Launch menu. Write your own Codex-flavored hooks using the same token → endpoint pattern.
+Save. No restart required — the preset shows up in the ⌘T picker and Launch menu immediately. Set it as default from the same row if you want new tasks to pick it up automatically. Write your own agent-flavored hooks using the same token → endpoint pattern.
 
 ## Roadmap
 
-- Agent preset CRUD UI (currently SQLite-only).
 - `contrib/` with vetted hook configs for Claude Code / Codex / Gemini / Aider.
 - Structured session logs surfaced in a panel next to the terminal.
-- `POST /v1/task_context_append` so agents can post typed note updates without touching the file directly.

@@ -13,11 +13,9 @@ Pre-release. Built for one person's workflow. Shared in the open; happy to merge
 - **GitHub Issues as second provider** — the internal commands already take `provider_id: &str`.
 - **Jira, Notion** — further siblings.
 - **Background opacity + blur** via `NSVisualEffectView`. Deserves a proper design phase, not a flag.
-- **Agent preset CRUD UI** — currently SQLite-only.
 - **User-configurable keyboard shortcuts.**
 - **Structured agent session logs** in a panel next to the terminal.
-- **`POST /v1/task_context_append`** so agents can append typed notes via the hook server instead of editing `.weft/context.md` directly.
-- **Lazy refresh of cached Linear ticket titles** on a background pass (plumbed via `task_tickets.title_fetched_at`; currently manual-only).
+- **Periodic Linear ticket-title refresh.** On-access lazy refresh ships today; a background tick would catch tasks open in long-running sessions.
 - **Windows / Linux builds.** Tauri makes it possible; not a v1 concern.
 
 ## Non-goals

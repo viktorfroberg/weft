@@ -363,21 +363,52 @@ function FlatTaskList({
   onToggleDone: () => void;
   ticketsByTaskId: Map<string, string[]>;
 }) {
+  // Live-agent set: any task whose terminal tabs include an agent-kind
+  // tab with a sessionId that hasn't recorded a pty_exit yet. Lifted
+  // out of TaskRow for one reason: bucketing. If an agent is running
+  // but the hook server hasn't flipped the DB status to `working` (or
+  // the agent never sent a status event), a pure-status bucket leaves
+  // the task in "Idle" with a live spinner — visually contradictory.
+  // Promote any live task to the `working` bucket so the group header
+  // matches the row indicator.
+  const tabsByTaskId = useTerminalTabs((s) => s.byTaskId);
+  const exitsBySessionId = usePtyExits((s) => s.bySessionId);
+  const liveTaskIds = useMemo(() => {
+    const live = new Set<string>();
+    for (const [taskId, tabs] of Object.entries(tabsByTaskId)) {
+      if (
+        tabs.some(
+          (t) => t.kind === "agent" && !!t.sessionId && !exitsBySessionId[t.sessionId],
+        )
+      ) {
+        live.add(taskId);
+      }
+    }
+    return live;
+  }, [tabsByTaskId, exitsBySessionId]);
+
   // Status filter applied first; project filter needs per-task project
   // ids which are fetched by `TaskRow` (cached), so we apply it there.
+  // Apply the live override to the status used for filtering too, so a
+  // user who's hidden "Idle" still sees a just-launched-but-idle task.
   const statusFiltered = useMemo(
-    () => tasks.filter((t) => filterStatuses.has(t.status)),
-    [tasks, filterStatuses],
+    () =>
+      tasks.filter((t) => {
+        const effective = liveTaskIds.has(t.id) ? "working" : t.status;
+        return filterStatuses.has(effective as TaskStatus);
+      }),
+    [tasks, filterStatuses, liveTaskIds],
   );
 
   const byStatus: Record<string, Task[]> = useMemo(() => {
     const out: Record<string, Task[]> = {};
     for (const t of statusFiltered) {
-      if (!out[t.status]) out[t.status] = [];
-      out[t.status].push(t);
+      const bucket = liveTaskIds.has(t.id) ? "working" : t.status;
+      if (!out[bucket]) out[bucket] = [];
+      out[bucket].push(t);
     }
     return out;
-  }, [statusFiltered]);
+  }, [statusFiltered, liveTaskIds]);
 
   const done = byStatus.done ?? [];
   const hasAny = GROUP_ORDER.some((g) => (byStatus[g.status] ?? []).length > 0) ||
@@ -522,9 +553,13 @@ function TaskRow({
   // Relative-time stamp: prefer `completed_at` for done tasks (they
   // shipped at that moment), fall back to `created_at`. A future
   // `updated_at` column would replace both — see roadmap.
-  const stampAt = task.completed_at ?? task.created_at;
-  const stampShort = formatRelativeShort(stampAt);
-  const stampAbsolute = formatAbsolute(stampAt);
+  //
+  // Rust's `db/repo::now()` stores unix SECONDS; `formatRelativeShort`
+  // takes unix MILLIS. Scale at the boundary — don't touch the util
+  // since other call sites that truly have millis would break.
+  const stampAtMs = (task.completed_at ?? task.created_at) * 1000;
+  const stampShort = formatRelativeShort(stampAtMs);
+  const stampAbsolute = formatAbsolute(stampAtMs);
 
   return (
     <li>
