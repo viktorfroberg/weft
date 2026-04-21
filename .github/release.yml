@@ -1,0 +1,73 @@
+# Configures GitHub's "Generate release notes" auto-draft.
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+#
+# On a new Release, GitHub groups merged PRs since the previous tag by the
+# labels below. The resulting draft is a *skeleton* — final release prose is
+# hand-rewritten before publishing, same pattern as Zed / Neovim / Ghostty.
+
+changelog:
+  exclude:
+    # Drop dependabot bumps + internal churn from user-facing notes.
+    labels:
+      - ignore-for-release
+      - dependencies
+    authors:
+      - dependabot
+      - dependabot[bot]
+
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking
+        - breaking-change
+
+    - title: Features
+      labels:
+        - feature
+        - feat
+        - enhancement
+
+    - title: Appearance & UX
+      labels:
+        - ui
+        - ux
+        - design
+        - theme
+
+    - title: Integrations
+      labels:
+        - integration
+        - linear
+        - github-integration
+
+    - title: Agents & terminal
+      labels:
+        - agent
+        - terminal
+        - pty
+        - hook
+
+    - title: Fixes
+      labels:
+        - bug
+        - fix
+
+    - title: Performance
+      labels:
+        - performance
+        - perf
+
+    - title: Documentation
+      labels:
+        - docs
+        - documentation
+
+    - title: Refactor & internals
+      labels:
+        - refactor
+        - internal
+        - chore
+
+    - title: Other
+      labels:
+        - "*"
