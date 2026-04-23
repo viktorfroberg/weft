@@ -17,6 +17,8 @@ pub enum Entity {
     Settings,
     ProjectLink,
     Preset,
+    TerminalTab,
+    AgentSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

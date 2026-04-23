@@ -7,6 +7,7 @@ import { worktreeFileSides } from "@/lib/commands";
 import type { FileChange } from "@/lib/commands";
 import { useActiveScheme } from "@/lib/theme";
 import { usePrefs } from "@/stores/prefs";
+import { useCustomFonts } from "@/stores/custom_fonts";
 import { findFont } from "@/lib/themes/fonts";
 
 interface Props {
@@ -65,7 +66,8 @@ export function DiffViewer({
   const [error, setError] = useState<string | null>(null);
   const scheme = useActiveScheme();
   const fontFamilyId = usePrefs((s) => s.terminalFontFamily);
-  const font = findFont(fontFamilyId);
+  const customFonts = useCustomFonts((s) => s.rows);
+  const font = findFont(fontFamilyId, customFonts);
   const themeName = `weft-${scheme.id}`;
 
   // Register + activate the scheme's Monaco theme on mount AND on scheme

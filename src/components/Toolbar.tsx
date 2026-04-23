@@ -124,7 +124,14 @@ export function Toolbar() {
                   type="button"
                   data-tauri-drag-region="false"
                   onClick={c.onClick}
-                  className="hover:text-foreground truncate"
+                  // Clickable crumb: muted by default, promote on
+                  // hover with an underline so the affordance is
+                  // obvious. The prior `hover:text-foreground`-only
+                  // styling was too subtle — users didn't realise
+                  // clicking "weft" takes you home, and fell back to
+                  // the small back arrow as the only nav path.
+                  className="text-muted-foreground hover:text-foreground cursor-pointer truncate rounded px-1 -mx-1 transition-colors hover:underline underline-offset-2"
+                  title="Home"
                 >
                   {c.label}
                 </button>

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Plus } from "lucide-react";
+import { Moon, Plus, Sun } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -108,21 +108,41 @@ export function AddSchemeDialog({ open, onOpenChange }: Props) {
         )}
 
         {tab === "presets" && (
-          <div className="grid max-h-[400px] grid-cols-2 gap-2 overflow-y-auto pr-1">
-            {presets.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => add(p)}
-                className="border-border hover:bg-accent flex items-center gap-2 rounded-md border p-2 text-left transition-colors"
-              >
-                <SwatchRow scheme={p} compact />
-                <span className="flex-1 truncate text-xs font-medium">
-                  {p.name}
-                </span>
-                <Plus size={12} className="text-muted-foreground shrink-0" />
-              </button>
-            ))}
+          <div className="max-h-[400px] space-y-3 overflow-y-auto pr-1">
+            {(["dark", "light"] as const).map((appearance) => {
+              const group = presets.filter(
+                (p) => p.appearance === appearance,
+              );
+              if (group.length === 0) return null;
+              const Icon = appearance === "dark" ? Moon : Sun;
+              return (
+                <div key={appearance} className="space-y-1.5">
+                  <div className="text-muted-foreground flex items-center gap-1.5 text-xs uppercase tracking-wide">
+                    <Icon size={11} />
+                    {appearance === "dark" ? "Dark" : "Light"}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {group.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => add(p)}
+                        className="border-border hover:bg-accent flex items-center gap-2 rounded-md border p-2 text-left transition-colors"
+                      >
+                        <SwatchRow scheme={p} compact />
+                        <span className="flex-1 truncate text-xs font-medium">
+                          {p.name}
+                        </span>
+                        <Plus
+                          size={12}
+                          className="text-muted-foreground shrink-0"
+                        />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 

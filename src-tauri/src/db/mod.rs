@@ -76,6 +76,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0010_task_name_locked_at",
         include_str!("../../migrations/0010_task_name_locked_at.sql"),
     ),
+    (
+        "0011_terminal_tabs",
+        include_str!("../../migrations/0011_terminal_tabs.sql"),
+    ),
+    (
+        "0012_agent_sessions_and_resume",
+        include_str!("../../migrations/0012_agent_sessions_and_resume.sql"),
+    ),
 ];
 
 /// Platform data dir for weft (created if missing). Shared by the DB and

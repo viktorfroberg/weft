@@ -49,6 +49,11 @@ pub struct AgentPreset {
     /// is treated as `Argv` by the launch pipeline — the portable
     /// default.
     pub bootstrap_delivery: Option<BootstrapDelivery>,
+    /// Whether this agent's CLI supports resuming a prior session via
+    /// a captured external `session_id`. Today: Claude Code only
+    /// (via `claude --resume <id>`). Drives the dormant-tab reopen
+    /// path — see `services/agent_launch::resolve_launch_resume`.
+    pub supports_resume: bool,
 }
 
 /// Shape for creating a new preset via the Settings UI. `is_default` is
@@ -85,7 +90,7 @@ pub struct PresetRepo<'a> {
     conn: &'a Connection,
 }
 
-const SELECT_COLS: &str = "id, name, command, args_json, env_json, is_default, sort_order, created_at, bootstrap_prompt_template, bootstrap_delivery";
+const SELECT_COLS: &str = "id, name, command, args_json, env_json, is_default, sort_order, created_at, bootstrap_prompt_template, bootstrap_delivery, supports_resume";
 
 impl<'a> PresetRepo<'a> {
     pub fn new(conn: &'a Connection) -> Self {
@@ -324,5 +329,6 @@ fn row_to_preset(row: &rusqlite::Row) -> rusqlite::Result<AgentPreset> {
         created_at: row.get(7)?,
         bootstrap_prompt_template: row.get(8)?,
         bootstrap_delivery: delivery_raw.as_deref().and_then(BootstrapDelivery::parse),
+        supports_resume: row.get::<_, i64>(10)? != 0,
     })
 }

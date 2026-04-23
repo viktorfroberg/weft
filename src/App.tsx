@@ -3,8 +3,10 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { router } from "@/router";
 import { queryClient } from "@/query";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
+import { QuitConfirmDialog } from "@/components/QuitConfirmDialog";
 import { Toaster } from "@/components/ui/sonner";
 import { DbEventBridge } from "@/lib/db-event-bridge";
+import { CustomFontsBootstrap } from "@/lib/custom-fonts-bootstrap";
 
 /**
  * Outermost providers. Kept thin — everything app-specific lives in
@@ -23,8 +25,10 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <DbEventBridge />
+      <CustomFontsBootstrap />
       <RouterProvider router={router} />
       <ConfirmDialogHost />
+      <QuitConfirmDialog />
       <Toaster />
     </QueryClientProvider>
   );

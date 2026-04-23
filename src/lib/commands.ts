@@ -229,6 +229,9 @@ export interface TerminalSpawnInput {
   rows: number;
   cols: number;
   task_id?: string;
+  /** Binds this PTY to a persistent tab row so the waiter flips it to
+   *  dormant + persists scrollback on child exit. */
+  tab_id?: string;
 }
 
 export function terminalSpawn(
@@ -246,6 +249,79 @@ export const terminalResize = (id: string, rows: number, cols: number) =>
 
 export const terminalKill = (id: string) =>
   invoke<void>("terminal_kill", { id });
+
+/** Signal-escalating shutdown: SIGHUP → SIGTERM → SIGKILL over
+ *  `timeoutMs` (default 5000). Awaits the waiter's dormant-row +
+ *  scrollback-persist work before returning — safe to follow with
+ *  `tabDelete` without racing. */
+export type ExitMode = "hup" | "term" | "kill";
+export const terminalShutdownGraceful = (
+  id: string,
+  timeoutMs?: number,
+): Promise<ExitMode> =>
+  invoke<ExitMode>("terminal_shutdown_graceful", {
+    id,
+    timeoutMs: timeoutMs ?? null,
+  });
+
+// ---------------------------------------------------------------------------
+// Persistent terminal tabs
+// ---------------------------------------------------------------------------
+
+export type TabKind = "shell" | "agent";
+export type TabState = "live" | "dormant";
+
+export interface TerminalTabRow {
+  id: string;
+  task_id: string;
+  kind: TabKind;
+  label: string;
+  preset_id: string | null;
+  sort_order: number;
+  state: TabState;
+  closed_at: number | null;
+  last_exit_code: number | null;
+  cwd: string | null;
+  created_at: number;
+}
+
+export const tabList = (taskId: string) =>
+  invoke<TerminalTabRow[]>("tab_list", { taskId });
+
+export const tabCreate = (input: {
+  task_id: string;
+  kind: TabKind;
+  label: string;
+  preset_id?: string | null;
+  cwd?: string | null;
+}) =>
+  invoke<TerminalTabRow>("tab_create", {
+    input: {
+      task_id: input.task_id,
+      kind: input.kind,
+      label: input.label,
+      preset_id: input.preset_id ?? null,
+      cwd: input.cwd ?? null,
+    },
+  });
+
+export const tabDelete = (id: string) => invoke<void>("tab_delete", { id });
+
+export const tabScrollbackRead = (id: string) =>
+  invoke<number[]>("tab_scrollback_read", { id }).then(
+    (arr) => new Uint8Array(arr),
+  );
+
+export interface AliveSessionView {
+  session_id: string;
+  tab_id: string | null;
+  task_id: string | null;
+  label: string | null;
+  kind: TabKind | null;
+}
+
+export const terminalAliveSessionsWorthWarning = () =>
+  invoke<AliveSessionView[]>("terminal_alive_sessions_worth_warning");
 
 // ---------------------------------------------------------------------------
 // Phase 6: diff / changes
@@ -355,6 +431,10 @@ export interface AgentPreset {
   /** Where the bootstrap template lands in argv. Null → treated as
    *  `argv` (portable). Claude uses `append_system_prompt`. */
   bootstrap_delivery: BootstrapDelivery | null;
+  /** Whether the underlying CLI supports resuming a prior session via
+   *  `--resume <session_id>`. Today: Claude Code. Drives whether the
+   *  dormant-tab reopen path injects a captured external session id. */
+  supports_resume: boolean;
 }
 
 export interface NewAgentPresetInput {
@@ -404,6 +484,8 @@ export function agentLaunch(
      *  `null` on relaunch so Claude doesn't auto-submit a stale first
      *  message. */
     initial_prompt?: string | null;
+    /** Optional persistent-tab binding. Required for dormant→live resume. */
+    tab_id?: string | null;
   },
   channel: Channel<Uint8Array>,
 ): Promise<string> {
@@ -413,9 +495,98 @@ export function agentLaunch(
     rows: input.rows,
     cols: input.cols,
     initialPrompt: input.initial_prompt ?? null,
+    tabId: input.tab_id ?? null,
     channel,
   });
 }
+
+/** Resume a previously-captured external agent session (Claude `--resume`).
+ *  Caller looks up the session via `taskAgentSessionGet` and the preset
+ *  via `presetDefault`/`presetsList`. Backend asserts `preset.supports_resume`. */
+export function agentLaunchResume(
+  input: {
+    task_id: string;
+    preset_id?: string | null;
+    rows: number;
+    cols: number;
+    external_session_id: string;
+    tab_id?: string | null;
+  },
+  channel: Channel<Uint8Array>,
+): Promise<string> {
+  return invoke<string>("agent_launch_resume", {
+    taskId: input.task_id,
+    presetId: input.preset_id ?? null,
+    rows: input.rows,
+    cols: input.cols,
+    externalSessionId: input.external_session_id,
+    tabId: input.tab_id ?? null,
+    channel,
+  });
+}
+
+export interface AgentSessionRow {
+  task_id: string;
+  source: string;
+  external_session_id: string;
+  last_seen_at: number;
+}
+
+/** Returns null if no hook event has yet captured a session id for
+ *  this (task, source) pair. */
+export const taskAgentSessionGet = (taskId: string, source: string) =>
+  invoke<AgentSessionRow | null>("task_agent_session_get", {
+    taskId,
+    source,
+  });
+
+// ---------------------------------------------------------------------------
+// Custom fonts (file-imported). Mirrors `services/fonts.rs::CustomFont`.
+// ---------------------------------------------------------------------------
+
+export interface CustomFontRow {
+  id: string;
+  display_name: string;
+  /** Original filename — used to derive the `.ext` for asset URL +
+   *  `format(...)` hint in `@font-face`. NOT shown to the user. */
+  file_basename: string;
+  ligatures: boolean;
+  variable: boolean;
+  byte_size: number;
+  installed_at: number;
+  /** Optional italic-variant filename. When present, a second
+   *  `@font-face` block with `font-style: italic` is emitted so xterm
+   *  italic ANSI escapes (`\x1b[3m`) resolve to the proper italic face
+   *  instead of falling back to synthetic italic on the regular file. */
+  italic_file_basename: string | null;
+}
+
+export const fontList = () => invoke<CustomFontRow[]>("font_list");
+
+/** Pops a native file picker, then copies the chosen font into weft's
+ *  data dir. Resolves to `null` if the user cancels. */
+export const fontInstallPick = () =>
+  invoke<CustomFontRow | null>("font_install_pick");
+
+export const fontRemove = (id: string) => invoke<void>("font_remove", { id });
+
+export const fontRename = (id: string, name: string) =>
+  invoke<CustomFontRow>("font_rename", { id, name });
+
+export const fontSetLigatures = (id: string, on: boolean) =>
+  invoke<CustomFontRow>("font_set_ligatures", { id, on });
+
+export const fontSetVariable = (id: string, on: boolean) =>
+  invoke<CustomFontRow>("font_set_variable", { id, on });
+
+/** Pop a file picker, then pair the chosen file as the italic
+ *  variant for an existing custom font. Resolves to `null` if the user
+ *  cancels. */
+export const fontPairItalicPick = (id: string) =>
+  invoke<CustomFontRow | null>("font_pair_italic_pick", { id });
+
+export const fontUnpairItalic = (id: string) =>
+  invoke<CustomFontRow>("font_unpair_italic", { id });
 
 // ---------------------------------------------------------------------------
 // v1.0.2 — ticket integrations

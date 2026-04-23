@@ -5,8 +5,16 @@ import { LigaturesAddon } from "@xterm/addon-ligatures";
 import "@xterm/xterm/css/xterm.css";
 import { useActiveScheme } from "@/lib/theme";
 import { usePrefs } from "@/stores/prefs";
+import { useCustomFonts } from "@/stores/custom_fonts";
 import { findFont } from "@/lib/themes/fonts";
 import { onTestBell, playBell } from "@/lib/themes/bell";
+
+// 12 fixture lines today; +4 buffer covers wraps when the user picks a
+// large font + a narrow window (the long `// arrow…` line wraps to 2
+// or 3 visual rows easily). Rows we ask xterm to display = preview
+// rows; container height tracks (rows × cell-height + padding).
+const FIXTURE_LINES = 12;
+const PREVIEW_ROWS = FIXTURE_LINES + 4;
 
 const FIXTURE = [
   // Prompt + command
@@ -53,9 +61,10 @@ export function TerminalPreview() {
   const cursorStyle = usePrefs((s) => s.cursorStyle);
   const cursorBlink = usePrefs((s) => s.cursorBlink);
   const bellStyle = usePrefs((s) => s.bellStyle);
+  const customFonts = useCustomFonts((s) => s.rows);
   const [bellFlash, setBellFlash] = useState(false);
 
-  const font = findFont(fontFamilyId);
+  const font = findFont(fontFamilyId, customFonts);
 
   // Subscribe to test-bell events from the Settings "Test bell" button.
   // Dispatch visual + audible per the user's active bellStyle.
@@ -86,10 +95,23 @@ export function TerminalPreview() {
       lineHeight,
       cursorStyle,
       cursorBlink,
+      // Match the active cursor style when the preview isn't focused
+      // so the user can actually see the cursor without clicking
+      // into the preview. xterm's default `outline` renders an empty
+      // hollow box on unfocused terminals — fine for a real terminal
+      // tab but useless for a static preview where the user is here
+      // SPECIFICALLY to see how the cursor looks.
+      cursorInactiveStyle: cursorStyle,
       drawBoldTextInBrightColors: boldIsBright,
       letterSpacing: 0,
       minimumContrastRatio: 4.5,
       allowTransparency: false,
+      // Pin rows to FIXTURE_LINES + a wrap buffer so the swatch line
+      // at the bottom never falls off into scrollback. Without an
+      // explicit `rows`, xterm's default (24) + fit()'s container-
+      // driven shrink can leave us with rows < fixture lines → user
+      // has to scroll inside the preview.
+      rows: PREVIEW_ROWS,
       // Smaller scrollback — preview never grows.
       scrollback: 100,
       // Disable input — preview is read-only.
@@ -108,17 +130,31 @@ export function TerminalPreview() {
       xterm.loadAddon(new LigaturesAddon());
     }
 
-    // Two-frame layout settle (same reason as TerminalView).
+    // Two-frame layout settle (same reason as TerminalView), then
+    // wait for the font to actually be ready before measuring cells.
+    // Skipping the document.fonts.load step makes xterm cache the
+    // fallback's (wider) metrics on first mount with a custom font.
     let disposed = false;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         if (disposed) return;
-        try {
-          fit.fit();
-        } catch {
-          /* ignore */
-        }
-        xterm.write(FIXTURE);
+        document.fonts
+          .load(`${fontSize}px ${font.css}`)
+          .catch(() => {})
+          .then(() => {
+            if (disposed) return;
+            try {
+              fit.fit();
+              // fit() picked cols from container width; it ALSO
+              // overrode rows from container height which we want to
+              // be PREVIEW_ROWS. Restore so the fixture (and any
+              // wrapped lines) always have room without scrolling.
+              xterm.resize(xterm.cols, PREVIEW_ROWS);
+            } catch {
+              /* ignore */
+            }
+            xterm.write(FIXTURE);
+          });
       });
     });
 
@@ -147,13 +183,31 @@ export function TerminalPreview() {
     x.options.fontSize = fontSize;
     x.options.lineHeight = lineHeight;
     x.options.cursorStyle = cursorStyle;
+    x.options.cursorInactiveStyle = cursorStyle;
     x.options.cursorBlink = cursorBlink;
     x.options.drawBoldTextInBrightColors = boldIsBright;
-    try {
-      fitRef.current?.fit();
-    } catch {
-      /* ignore */
-    }
+    // See Terminal.tsx for the rationale — refit AFTER the font has
+    // actually loaded, otherwise xterm measures with the fallback's
+    // wider cell metrics and the new glyphs render with huge gaps.
+    let cancelled = false;
+    document.fonts
+      .load(`${fontSize}px ${font.css}`)
+      .catch(() => {})
+      .then(() => {
+        if (cancelled) return;
+        try {
+          fitRef.current?.fit();
+          // Same restore as in init — fit() will have shrunk rows back
+          // to whatever the container height supports; pin to
+          // PREVIEW_ROWS so the fixture keeps fitting.
+          xtermRef.current?.resize(xtermRef.current.cols, PREVIEW_ROWS);
+        } catch {
+          /* ignore */
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [
     font,
     fontWeight,
@@ -172,12 +226,31 @@ export function TerminalPreview() {
     }
   }, [padX, padY]);
 
+  // Cursor blink animation is xterm's own — only fires when the
+  // preview has focus. We tried driving a synthetic blink via a
+  // setInterval toggling `cursorInactiveStyle`, but combined with
+  // xterm's native blink on focus it produced a doubled / desynced
+  // animation when the user clicked into the preview. Click-to-blink
+  // is good enough; the static `cursorInactiveStyle` (set in the
+  // hot-swap effect above) keeps the cursor visible at all times.
+
+  // Height = PREVIEW_ROWS × cell height + padding + small fudge for
+  // xterm's per-cell descender allowance (real cell-height is
+  // `ceil(fontSize × lineHeight)` plus ~1-2px the renderer adds for
+  // descenders). Without `+ PREVIEW_ROWS * 2` margin the swatch line
+  // at the bottom gets clipped at large font sizes.
+  const cellHeight = Math.ceil(fontSize * lineHeight) + 2;
+  const previewHeight = PREVIEW_ROWS * cellHeight + padY * 2 + 8;
+
   return (
     <div
       className={`border-border/60 overflow-hidden rounded-lg border transition-[box-shadow] duration-150 ${
         bellFlash ? "ring-primary ring-2 ring-inset" : ""
       }`}
-      style={{ background: scheme.terminal.background, height: 220 }}
+      style={{
+        background: scheme.terminal.background,
+        height: previewHeight,
+      }}
     >
       <div
         ref={hostRef}

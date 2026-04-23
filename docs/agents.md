@@ -137,7 +137,7 @@ curl -sX POST "http://127.0.0.1:$(cat ~/Library/Application\ Support/weft/hooks.
 
 ## Wiring Claude Code's native hook system
 
-Claude Code has its own tool/session hooks (see the [Claude Code docs](https://docs.claude.com/claude-code/hooks)). To forward them to weft, configure your `~/.claude/settings.json` (or project-local `.claude/settings.json`) to `curl` the events:
+Claude Code has its own tool/session hooks (see the [Claude Code docs](https://docs.claude.com/claude-code/hooks)). weft exposes a no-deps endpoint that accepts Claude's native hook payload as-is — your `~/.claude/settings.json` (or project-local `.claude/settings.json`) is one curl per hook, no `jq` / `python` parsing required:
 
 ```json
 {
@@ -147,7 +147,7 @@ Claude Code has its own tool/session hooks (see the [Claude Code docs](https://d
         "matcher": "",
         "hooks": [{
           "type": "command",
-          "command": "curl -sX POST \"$WEFT_HOOKS_URL\" -H \"Authorization: Bearer $WEFT_HOOKS_TOKEN\" -H 'Content-Type: application/json' -d '{\"source\":\"claude_code\",\"task_id\":\"'$WEFT_TASK_ID'\",\"kind\":\"active\",\"timestamp\":'$(date +%s)'}'"
+          "command": "curl -sX POST \"$WEFT_HOOKS_URL_CLAUDE\" -H \"Authorization: Bearer $WEFT_HOOKS_TOKEN\" -H \"X-Weft-Task-Id: $WEFT_TASK_ID\" -H 'Content-Type: application/json' --data-binary @-"
         }]
       }
     ],
@@ -156,7 +156,7 @@ Claude Code has its own tool/session hooks (see the [Claude Code docs](https://d
         "matcher": "",
         "hooks": [{
           "type": "command",
-          "command": "curl -sX POST \"$WEFT_HOOKS_URL\" -H \"Authorization: Bearer $WEFT_HOOKS_TOKEN\" -H 'Content-Type: application/json' -d '{\"source\":\"claude_code\",\"task_id\":\"'$WEFT_TASK_ID'\",\"kind\":\"waiting_input\",\"timestamp\":'$(date +%s)'}'"
+          "command": "curl -sX POST \"$WEFT_HOOKS_URL_CLAUDE\" -H \"Authorization: Bearer $WEFT_HOOKS_TOKEN\" -H \"X-Weft-Task-Id: $WEFT_TASK_ID\" -H 'Content-Type: application/json' --data-binary @-"
         }]
       }
     ]
@@ -164,7 +164,11 @@ Claude Code has its own tool/session hooks (see the [Claude Code docs](https://d
 }
 ```
 
-The env vars are already in the PTY. `curl -s` keeps noise off your terminal output.
+The `--data-binary @-` reads Claude's hook payload from stdin and forwards it verbatim. weft does the field extraction server-side: pulls `session_id` (for `--resume` on dormant-tab reopen) and `hook_event_name` (for the sidebar status dot). The same one-line command works for every Claude hook event — copy it into `PreToolUse`, `PostToolUse`, `Notification`, etc. as needed.
+
+The env vars (`WEFT_HOOKS_URL_CLAUDE`, `WEFT_HOOKS_TOKEN`, `WEFT_TASK_ID`) are injected automatically into every agent PTY weft spawns. `curl -s` keeps noise off your terminal output.
+
+> **Generic agents (codex, aider, etc.)** still use the older `/v1/events` endpoint at `$WEFT_HOOKS_URL` with hand-crafted JSON — see the [Hook event shape](#event-shape) section above. The native endpoint is Claude-Code-specific; we'll add per-agent native paths as patterns settle.
 
 > **Scripts will land in `contrib/` as they stabilize.** PRs welcome.
 

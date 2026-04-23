@@ -12,7 +12,8 @@ export type Entity =
   | "workspace_section"
   | "settings"
   | "project_link"
-  | "preset";
+  | "preset"
+  | "terminal_tab";
 
 export type Op = "insert" | "update" | "delete";
 

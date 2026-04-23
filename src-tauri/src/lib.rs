@@ -30,6 +30,12 @@ pub struct AppState {
     /// handler and (future) Tauri-side callers. Agent install wrappers
     /// in `contrib/install-lock/` use this via `/v1/install-lock`.
     pub install_locks: Arc<hooks::InstallLockStore>,
+    /// Process-wide mutex for custom-font manifest mutations. The
+    /// manifest is a small JSON file at
+    /// `~/Library/Application Support/weft/fonts/fonts.json`; two
+    /// concurrent installs would otherwise read-modify-write race and
+    /// lose a row. See `services/fonts.rs`.
+    pub font_lock: Arc<Mutex<()>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -62,6 +68,13 @@ pub fn run() {
         tracing::warn!(error = %e, "startup reconcile failed");
     }
 
+    // Orphan custom-font cleanup. Uses a fresh mutex (the AppState
+    // version isn't built yet) — safe because nothing else can touch
+    // the fonts dir before Tauri spins up.
+    if let Err(e) = services::fonts::reconcile_orphans(&Mutex::new(())) {
+        tracing::warn!(error = %e, "font reconcile failed");
+    }
+
     let db = Arc::new(Mutex::new(db_conn));
 
     // Hydrate the in-memory StatusStore from SQLite before the hook server
@@ -87,6 +100,7 @@ pub fn run() {
             terminals: Arc::new(terminal::TerminalManager::new()),
             clone_fallbacks: Arc::new(Mutex::new(HashSet::new())),
             install_locks: Arc::clone(&install_locks),
+            font_lock: Arc::new(Mutex::new(())),
         })
         .setup(move |app| {
             // Native macOS menu bar — wires ⌘-shortcut discoverability to
@@ -174,7 +188,16 @@ pub fn run() {
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
             commands::terminal::terminal_kill,
+            commands::terminal::terminal_shutdown_graceful,
+            commands::terminal::terminal_alive_sessions_worth_warning,
+            commands::terminal::tab_list,
+            commands::terminal::tab_create,
+            commands::terminal::tab_delete,
+            commands::terminal::tab_scrollback_read,
+            commands::terminal::app_exit,
             commands::terminal::agent_launch,
+            commands::terminal::agent_launch_resume,
+            commands::terminal::task_agent_session_get,
             commands::presets::presets_list,
             commands::presets::preset_default,
             commands::presets::preset_create,
@@ -204,7 +227,78 @@ pub fn run() {
             commands::project_links::project_links_warm_up_main,
             commands::project_links::project_links_health,
             commands::devlog::dev_log,
+            commands::fonts::font_list,
+            commands::fonts::font_install_pick,
+            commands::fonts::font_remove,
+            commands::fonts::font_rename,
+            commands::fonts::font_set_ligatures,
+            commands::fonts::font_set_variable,
+            commands::fonts::font_pair_italic_pick,
+            commands::fonts::font_unpair_italic,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            use tauri::{Emitter, Manager};
+            // Red-X / window-close path. Prevent default if there are
+            // agent/shell sessions worth warning about, and route to the
+            // frontend dialog.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let state = window.state::<AppState>();
+                if !has_warn_worthy_sessions(&state) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.emit("weft://quit-requested", ());
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app_handle, event| {
+            use tauri::{Emitter, Manager};
+            // App-level quit (⌘Q on macOS). Same gate as the window
+            // close path.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let state = app_handle.state::<AppState>();
+                if !has_warn_worthy_sessions(&state) {
+                    return;
+                }
+                api.prevent_exit();
+                if let Some(win) = app_handle.get_webview_window("main") {
+                    let _ = win.emit("weft://quit-requested", ());
+                }
+            }
+        });
+}
+
+/// Liveness gate shared by both quit paths. Mirrors the logic behind
+/// `terminal_alive_sessions_worth_warning` but cheap enough to call
+/// synchronously from a quit event: we only need "any?" rather than the
+/// full list.
+fn has_warn_worthy_sessions(state: &AppState) -> bool {
+    use crate::db::repo::{TabKind, TerminalTabRepo};
+
+    let raw = state.terminals.alive_sessions();
+    if raw.is_empty() {
+        return false;
+    }
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => return true, // fail-open: better to prompt than not
+    };
+    let repo = TerminalTabRepo::new(&conn);
+    for s in &raw {
+        let tab = s.tab_id.as_ref().and_then(|t| repo.get(t).ok().flatten());
+        match tab {
+            Some(row) if row.kind == TabKind::Agent => return true,
+            Some(row) if row.kind == TabKind::Shell => {
+                if let Some(pid) = s.pid {
+                    if crate::commands::terminal::shell_has_foreground_job(pid) {
+                        return true;
+                    }
+                }
+            }
+            None => return true, // unknown provenance — be conservative
+            _ => {}
+        }
+    }
+    false
 }

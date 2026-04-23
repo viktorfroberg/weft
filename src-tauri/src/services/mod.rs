@@ -5,6 +5,7 @@
 //! resulting `DbEvent`s.
 
 pub mod agent_launch;
+pub mod fonts;
 pub mod open_in_editor;
 pub mod project_link_presets;
 pub mod project_links_health;

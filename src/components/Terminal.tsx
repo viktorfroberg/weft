@@ -14,6 +14,8 @@ import {
 } from "@/lib/commands";
 import { useActiveScheme } from "@/lib/theme";
 import { usePrefs } from "@/stores/prefs";
+import { useCustomFonts } from "@/stores/custom_fonts";
+import { usePtyExits } from "@/stores/pty_exits";
 import { findFont } from "@/lib/themes/fonts";
 import { playBell } from "@/lib/themes/bell";
 import { traceEvent, useLifecycleTrace, useRateCounter } from "@/lib/dev-trace";
@@ -41,6 +43,20 @@ interface Props {
    *  the parent correlate `pty_exit` events (keyed by session id) with
    *  this tab (keyed by sessionKey). */
   onSpawned?: (sessionId: string) => void;
+  /** When set, this terminal mounts in "dormant replay" mode: the bytes
+   *  are painted into xterm, stdin is blocked, and an overlay banner
+   *  prompts the user to press ⏎ to resume. Passing `null`/undefined =
+   *  normal live spawn.
+   *
+   *  The bytes have already been sanitized by the Rust recorder
+   *  (`terminal/recorder.rs`) — alt-screen + cursor-positioning escapes
+   *  are stripped; colors + newlines pass through. Safe to `term.write`
+   *  without clobbering a fresh layout. */
+  dormantBytes?: Uint8Array | null;
+  /** Called exactly once when the user requests resume (⏎ or click).
+   *  Parent is responsible for bumping `sessionKey` so TerminalView
+   *  remounts with `dormantBytes = null` and the normal spawn path. */
+  onResume?: () => void;
 }
 
 /**
@@ -60,7 +76,17 @@ export function TerminalView({
   spawn,
   visible = true,
   onSpawned,
+  dormantBytes,
+  onResume,
 }: Props) {
+  const dormantBytesRef = useRef<Uint8Array | null | undefined>(dormantBytes);
+  const onResumeRef = useRef<typeof onResume>(onResume);
+  useEffect(() => {
+    dormantBytesRef.current = dormantBytes;
+  }, [dormantBytes]);
+  useEffect(() => {
+    onResumeRef.current = onResume;
+  }, [onResume]);
   useLifecycleTrace(`Terminal(${sessionKey})`);
   const countChunk = useRateCounter(`Terminal(${sessionKey}).onmessage`);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -87,6 +113,7 @@ export function TerminalView({
   const cursorStyle = usePrefs((s) => s.cursorStyle);
   const cursorBlink = usePrefs((s) => s.cursorBlink);
   const bellStyle = usePrefs((s) => s.bellStyle);
+  const customFonts = useCustomFonts((s) => s.rows);
 
   // A ref to the current bellStyle so the xterm `onBell` handler (wired
   // once at mount) always sees the latest value without needing a
@@ -96,7 +123,7 @@ export function TerminalView({
     bellStyleRef.current = bellStyle;
   }, [bellStyle]);
 
-  const font = findFont(fontFamilyId);
+  const font = findFont(fontFamilyId, customFonts);
 
   // ⌘F while the terminal (or its host) has keyboard focus opens the
   // inline search bar. Scoped to this Terminal's host so hitting ⌘F
@@ -125,6 +152,15 @@ export function TerminalView({
 
   // Hot-swap font / cursor options. xterm recomputes cell dimensions on
   // next render; we re-fit so rows/cols stay accurate.
+  //
+  // The `document.fonts.load(...)` await is load-bearing for system
+  // fonts (and harmless for bundled ones, which are already in the
+  // FontFaceSet via `@fontsource-variable/*` imports in `main.tsx`).
+  // Without it, xterm measures cell width during the synchronous render
+  // BEFORE the OS has resolved the new family — it grabs the wider
+  // generic-`monospace` fallback metrics, then the actual font finishes
+  // loading and renders correctly-sized glyphs at those wider cell
+  // positions = "every character has 5 spaces around it" misrender.
   useEffect(() => {
     const x = xtermRef.current;
     if (!x) return;
@@ -136,11 +172,24 @@ export function TerminalView({
     x.options.cursorStyle = cursorStyle;
     x.options.cursorBlink = cursorBlink;
     x.options.drawBoldTextInBrightColors = boldIsBright;
-    try {
-      fitRef.current?.fit();
-    } catch {
-      /* ignore */
-    }
+    let cancelled = false;
+    document.fonts
+      .load(`${fontSize}px ${font.css}`)
+      .catch(() => {
+        // Custom font isn't installed (or is mid-install). xterm will
+        // fall back to the FALLBACK chain; nothing to do.
+      })
+      .then(() => {
+        if (cancelled) return;
+        try {
+          fitRef.current?.fit();
+        } catch {
+          /* ignore */
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [
     font,
     fontWeight,
@@ -153,14 +202,42 @@ export function TerminalView({
 
   // When a hidden tab becomes visible, its dimensions change from 0 to
   // real — fit again so xterm knows its size.
+  //
+  // Two RAFs are load-bearing here, not paranoia: WebKit doesn't always
+  // flush layout between the React commit that flips `display: none → block`
+  // and the effect callback. A synchronous `fit()` reads `host.offsetWidth`
+  // before layout has run for the un-hidden parent and gets 0, which the
+  // fit addon turns into cols = 1. Then xterm wraps every line to one or
+  // two characters and *stays that way* (no further resize event fires on
+  // its own). One RAF gives the browser a chance to commit layout; the
+  // second is when we read dimensions. Resize fixes it manually because
+  // the user-driven ResizeObserver event arrives well after layout is
+  // settled.
   useEffect(() => {
-    if (visible && fitRef.current) {
-      try {
-        fitRef.current.fit();
-      } catch {
-        // ignore — might still be mid-mount
-      }
-    }
+    if (!visible) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const host = hostRef.current;
+        const fit = fitRef.current;
+        if (!host || !fit) return;
+        // Defensive: if dimensions are still zero (deeply nested
+        // visibility flip, layout still pending), skip — the
+        // IntersectionObserver / ResizeObserver in the init effect
+        // will pick it up once layout settles.
+        if (host.offsetWidth === 0 || host.offsetHeight === 0) return;
+        try {
+          fit.fit();
+        } catch {
+          /* ignore */
+        }
+      });
+    });
+    return () => {
+      if (raf1) cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
   }, [visible]);
 
   // Terminal init — effect keyed on sessionKey + ligatures (only). Other
@@ -177,6 +254,7 @@ export function TerminalView({
     let fitAddon: FitAddon | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let intersectionObserver: IntersectionObserver | null = null;
+    let dormantKeyCleanup: (() => void) | null = null;
     // PTY-write batching. Shell startup (e.g. a heavy `.zshrc`) can deliver
     // 100+ channel messages back-to-back; calling `xterm.write` synchronously
     // on each one can starve the main thread for long enough to look like a
@@ -259,10 +337,126 @@ export function TerminalView({
         ),
       );
       if (disposed) return;
+      // ALSO wait for the chosen font to be usable. Custom system fonts
+      // (Berkeley Mono, MonoLisa, etc.) aren't necessarily resolved by
+      // the OS until first use; if we measure cell width now, xterm
+      // grabs the wider generic-monospace fallback and the actual font
+      // renders with huge per-glyph gaps. `document.fonts.load` is a
+      // no-op for already-loaded bundled fonts — safe to await
+      // unconditionally.
+      try {
+        await document.fonts.load(`${fontSize}px ${font.css}`);
+      } catch {
+        // Font missing on system — xterm will fall back via the
+        // FALLBACK chain. Carry on.
+      }
+      if (disposed) return;
       try {
         fitAddon.fit();
       } catch {
         // ignore — resize observer will re-fit once layout is real
+      }
+
+      // Dormant-replay branch: paint the persisted transcript into the
+      // fresh xterm, block stdin, and wait for the user to press ⏎ or
+      // click the resume banner. NO PTY is spawned.
+      if (dormantBytesRef.current && dormantBytesRef.current.length >= 0) {
+        const bytes = dormantBytesRef.current;
+        // Heuristic: skip the byte replay when the recording is just
+        // alt-screen residue (Claude Code, vim, etc. — TUI sessions
+        // whose meaningful content lived in the alt-buffer that the
+        // recorder correctly stripped). Two signals:
+        //   1. printable count too low (< 500), OR
+        //   2. avg line length too short (< 16 printable chars per
+        //      newline) — TUI residue tends to be many tiny
+        //      fragments like `*g`, `thinking`, `*`, separated by
+        //      cursor moves we already stripped, leaving lots of
+        //      newlines around tiny words.
+        let printable = 0;
+        let newlines = 0;
+        for (let i = 0; i < bytes.length; i++) {
+          const b = bytes[i];
+          if (b === 0x0a) newlines++;
+          else if (b >= 0x20 && b !== 0x7f) printable++;
+        }
+        const avgLineLen = printable / Math.max(1, newlines);
+        const hasUsefulTranscript = printable >= 500 && avgLineLen >= 16;
+
+        if (hasUsefulTranscript) {
+          const sep = new TextEncoder().encode(
+            "\r\n\x1b[2m--- previous session ---\x1b[0m\r\n",
+          );
+          xterm.write(sep);
+          xterm.write(bytes);
+          xterm.write(new TextEncoder().encode("\r\n"));
+        } else {
+          xterm.write(
+            new TextEncoder().encode(
+              "\r\n\x1b[2m  Previous session was a full-screen app — no transcript to replay.\x1b[0m\r\n",
+            ),
+          );
+        }
+
+        // Install a one-shot resume on Enter via xterm's key handler
+        // (works once the user has clicked into the terminal).
+        const disposer = xterm.onKey(({ domEvent }) => {
+          if (disposed) return;
+          if (domEvent.key === "Enter") {
+            domEvent.preventDefault();
+            disposer.dispose();
+            onResumeRef.current?.();
+          }
+        });
+
+        // Auto-focus the host so xterm's onKey fires from the very
+        // first Enter without requiring the user to click into the
+        // terminal first. Focus is cheap to take here — the user is
+        // actively viewing this dormant tab and the terminal is the
+        // only interactive element on the panel.
+        host.focus();
+
+        // Also catch Enter at the document level. WebKit doesn't
+        // always route Enter into xterm if focus drifted to a
+        // sibling control between the auto-focus above and the
+        // user's keypress.
+        const onDocKey = (e: KeyboardEvent) => {
+          if (disposed) return;
+          if (e.key !== "Enter") return;
+          // Only intercept if the user isn't typing into another
+          // input.
+          const target = e.target as HTMLElement | null;
+          const tag = target?.tagName?.toLowerCase();
+          if (tag === "input" || tag === "textarea" || tag === "select") return;
+          if (target?.isContentEditable) return;
+          e.preventDefault();
+          disposer.dispose();
+          document.removeEventListener("keydown", onDocKey, true);
+          dormantKeyCleanup = null;
+          onResumeRef.current?.();
+        };
+        document.addEventListener("keydown", onDocKey, true);
+        dormantKeyCleanup = () => {
+          disposer.dispose();
+          document.removeEventListener("keydown", onDocKey, true);
+        };
+
+        traceEvent(`Terminal(${sessionKey}).dormant-replay`, {
+          bytes: bytes.length,
+          printable,
+          newlines,
+          avgLineLen: Math.round(avgLineLen * 10) / 10,
+          hasUsefulTranscript,
+        });
+
+        // Cleanup is handled by the outer init effect's return — but
+        // we also need to remove our document listener if the user
+        // navigates away or the tab unmounts before resume. Stash on
+        // a ref-style closure variable; the outer cleanup checks
+        // `disposed` and the listener will short-circuit.
+        // (Attaching here; the outer effect's `return` handles
+        // disposal of the xterm + observers, and `disposed = true`
+        // cuts the listener's effect.)
+        return;
       }
 
       const channel = new Channel<Uint8Array>();
@@ -291,7 +485,14 @@ export function TerminalView({
           ms: Math.round(performance.now() - spawnStarted),
           disposed,
         });
-        if (sessionId && !disposed) onSpawned?.(sessionId);
+        if (sessionId && !disposed) {
+          onSpawned?.(sessionId);
+          // Stamp spawn time so the pty_exits handler can suppress
+          // the toast for early-exit (spawn / resume failure)
+          // scenarios — see `subscribePtyExits` in
+          // `src/stores/pty_exits.ts`.
+          usePtyExits.getState().markSpawned(sessionId);
+        }
         // Some TUIs (Claude Code, vim, btop) paint their layout to the
         // first dimensions they see and only re-render on an explicit
         // SIGWINCH. If the shell picks up its size before the Panel
@@ -382,6 +583,7 @@ export function TerminalView({
       pendingChunks = [];
       resizeObserver?.disconnect();
       intersectionObserver?.disconnect();
+      dormantKeyCleanup?.();
       if (sessionId) terminalKill(sessionId).catch(() => {});
       xterm?.dispose();
       xtermRef.current = null;
@@ -428,6 +630,15 @@ export function TerminalView({
         }}
         tabIndex={0}
       />
+      {dormantBytes != null && (
+        <button
+          type="button"
+          onClick={() => onResume?.()}
+          className="bg-background/80 border-border text-muted-foreground hover:text-foreground absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md border px-3 py-1.5 text-xs shadow-lg backdrop-blur"
+        >
+          Session ended · press ⏎ or click to resume
+        </button>
+      )}
       {searchOpen && (
         <div
           className="bg-background border-border absolute z-10 flex items-center gap-1 rounded-md border px-2 py-1 shadow-lg animate-in fade-in slide-in-from-top-1 duration-150"

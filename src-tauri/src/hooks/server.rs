@@ -109,6 +109,7 @@ pub async fn start_server(mut ctx: AppCtx) -> Result<HookServerHandle> {
     let app = Router::new()
         .route("/healthz", axum::routing::get(healthz))
         .route("/v1/events", post(ingest_event))
+        .route("/v1/claude_native", post(ingest_claude_native))
         .route("/v1/install-lock", post(install_lock))
         .route("/v1/task_context_append", post(append_context_note))
         .with_state(ctx);
@@ -173,6 +174,46 @@ async fn ingest_event(
             Json(serde_json::json!({"error": "invalid token"})),
         );
     }
+
+    // Capture the agent's external session id, if the payload carries
+    // one. Claude Code's hooks include `session_id` at the top level of
+    // every payload — the user's hook command pulls it out of stdin
+    // (see docs/agents.md) and forwards it as `detail.session_id`.
+    //
+    // Auth split: writing this row drives the resume mechanism, so we
+    // bypass the empty-bearer dev-mode tolerance that the status path
+    // accepts. Forging session ids on a dev box would let any localhost
+    // process hijack which Claude session a tab resumes into.
+    if let Some(sid) = event
+        .detail
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        if token_ok_strict(&headers, &ctx.token) {
+            let conn = ctx.db.lock().unwrap_or_else(|e| e.into_inner());
+            let repo = crate::db::repo::TaskSessionRepo::new(&conn);
+            match repo.upsert(&event.task_id, &event.source, sid) {
+                Ok(db_event) => {
+                    if let Some(app) = ctx.app.as_ref() {
+                        if let Err(e) = app.emit(DB_EVENT_CHANNEL, &db_event) {
+                            tracing::warn!(error = %e, "session_id db_event emit failed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = %event.task_id,
+                        source = %event.source,
+                        error = %e,
+                        "session_id upsert failed"
+                    );
+                }
+            }
+        }
+    }
+
     let result = ctx.store.apply(&event);
 
     if result.changed {
@@ -224,6 +265,167 @@ async fn ingest_event(
             "changed": result.changed,
         })),
     )
+}
+
+/// Accept a Claude Code hook payload as-is. Claude pipes its native
+/// JSON to the hook command's stdin; users `curl --data-binary @-` it
+/// here verbatim. weft does the field extraction server-side so the
+/// hook config has zero parser dependencies (no `jq`, no `python -c`).
+///
+/// Wire shape:
+///   POST /v1/claude_native
+///   Authorization: Bearer <WEFT_HOOKS_TOKEN>
+///   X-Weft-Task-Id: <WEFT_TASK_ID>
+///   Content-Type: application/json
+///   Body: Claude's raw hook payload (any of the documented event kinds)
+///
+/// Claude payload fields we care about (rest is ignored / stored in
+/// `detail`):
+///   - `session_id`  → upserted to `task_agent_sessions` (for `--resume`)
+///   - `hook_event_name` → mapped to `EventKind` for `StatusStore.apply`
+///
+/// Auth: status updates use the lenient bearer (`token_ok`) for parity
+/// with `/v1/events`. The session_id capture path requires
+/// `token_ok_strict` — same split as `/v1/events` for the same reason
+/// (a forged session id corrupts the resume target).
+async fn ingest_claude_native(
+    State(ctx): State<AppCtx>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if !token_ok(&headers, &ctx.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid token"})),
+        );
+    }
+
+    let Some(task_id) = headers
+        .get("x-weft-task-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing X-Weft-Task-Id header",
+            })),
+        );
+    };
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("invalid json: {e}"),
+                })),
+            );
+        }
+    };
+
+    let hook_event_name: String = payload
+        .get("hook_event_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let kind = map_claude_hook_to_kind(&hook_event_name);
+
+    // Capture session_id under strict bearer (no empty-token dev bypass).
+    if let Some(sid) = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if token_ok_strict(&headers, &ctx.token) {
+            let conn = ctx.db.lock().unwrap_or_else(|e| e.into_inner());
+            let repo = crate::db::repo::TaskSessionRepo::new(&conn);
+            match repo.upsert(task_id, "claude_code", sid) {
+                Ok(db_event) => {
+                    if let Some(app) = ctx.app.as_ref() {
+                        if let Err(e) = app.emit(DB_EVENT_CHANNEL, &db_event) {
+                            tracing::warn!(error = %e, "claude_native session_id db_event emit failed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task = %task_id,
+                        error = %e,
+                        "claude_native session_id upsert failed"
+                    );
+                }
+            }
+        }
+    }
+
+    // Status update: synthesize a HookEvent and apply via the same path
+    // as /v1/events so behavior stays in lockstep.
+    let event = HookEvent {
+        source: "claude_code".to_string(),
+        task_id: task_id.to_string(),
+        kind,
+        detail: payload,
+        timestamp: time::OffsetDateTime::now_utc().unix_timestamp(),
+    };
+    let result = ctx.store.apply(&event);
+
+    if result.changed {
+        let status_str = task_status_as_str(result.to);
+        let task_id_owned = event.task_id.clone();
+        let rows_updated = {
+            let conn = ctx.db.lock().unwrap_or_else(|e| e.into_inner());
+            match conn.execute(
+                "UPDATE tasks SET status = ?1 WHERE id = ?2",
+                rusqlite::params![status_str, task_id_owned],
+            ) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(task = %task_id_owned, error = %e, "claude_native db update failed");
+                    0
+                }
+            }
+        };
+        if rows_updated == 0 {
+            tracing::debug!(task = %task_id_owned, "claude_native hook for unknown task — ignoring");
+        } else if let Some(app) = ctx.app.as_ref() {
+            let db_event = DbEvent::update(Entity::Task, task_id_owned);
+            if let Err(e) = app.emit(DB_EVENT_CHANNEL, &db_event) {
+                tracing::warn!(error = %e, "claude_native task db_event emit failed");
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": result.to,
+            "changed": result.changed,
+            "hook": hook_event_name,
+        })),
+    )
+}
+
+/// Claude Code's `hook_event_name` → weft's coarse `EventKind`. The
+/// granularity gap is intentional: weft's UI only cares about
+/// "is it working / waiting / errored / done", not which tool fired.
+/// All Claude work events collapse to `Active` so the spinner stays on
+/// during a long tool chain. `Stop` is the moment Claude is done
+/// generating and is waiting on the next user turn → `WaitingInput`.
+fn map_claude_hook_to_kind(name: &str) -> crate::hooks::events::EventKind {
+    use crate::hooks::events::EventKind;
+    match name {
+        "Stop" | "Notification" => EventKind::WaitingInput,
+        "SessionEnd" => EventKind::SessionEnd,
+        // Everything else (SessionStart, PreToolUse, PostToolUse,
+        // UserPromptSubmit, SubagentStop, PreCompact, future events
+        // we haven't seen) → Active.
+        _ => EventKind::Active,
+    }
 }
 
 /// Max body for a single appended note. 4 KiB is comfortable for
@@ -347,6 +549,12 @@ mod tests {
             .unwrap();
         conn.execute_batch(include_str!("../../migrations/0010_task_name_locked_at.sql"))
             .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0003_agent_presets.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/0012_agent_sessions_and_resume.sql"
+        ))
+        .unwrap();
         AppCtx {
             store: Arc::new(StatusStore::new()),
             db: Arc::new(Mutex::new(conn)),
@@ -364,6 +572,7 @@ mod tests {
         let app = Router::new()
             .route("/healthz", axum::routing::get(healthz))
             .route("/v1/events", post(ingest_event))
+            .route("/v1/claude_native", post(ingest_claude_native))
             .route("/v1/install-lock", post(install_lock))
             .with_state(ctx);
         let join = tokio::spawn(async move {
@@ -442,6 +651,248 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "working");
+
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn captures_session_id_with_real_bearer() {
+        let ctx = mk_ctx("secret");
+
+        use crate::db::repo::{
+            NewTask, NewWorkspace, TaskRepo, TaskSessionRepo, WorkspacesRepo,
+        };
+        let task_id = {
+            let conn = ctx.db.lock().unwrap();
+            let (ws, _) = WorkspacesRepo::new(&conn)
+                .insert(NewWorkspace {
+                    name: "w".into(),
+                    sort_order: None,
+                })
+                .unwrap();
+            let (task, _) = TaskRepo::new(&conn)
+                .insert(NewTask {
+                    workspace_id: Some(ws.id),
+                    name: "t".into(),
+                    agent_preset: None,
+                    initial_prompt: None,
+                })
+                .unwrap();
+            task.id
+        };
+
+        let (port, join) = start_test_server(ctx.clone()).await;
+        let event = HookEvent {
+            source: "claude_code".into(),
+            task_id: task_id.clone(),
+            kind: EventKind::Active,
+            detail: serde_json::json!({"session_id": "claude-sess-abc"}),
+            timestamp: 1,
+        };
+        let _ = http_post_json(port, "/v1/events", &event, Some("secret")).await;
+
+        let conn = ctx.db.lock().unwrap();
+        let row = TaskSessionRepo::new(&conn)
+            .get(&task_id, "claude_code")
+            .unwrap()
+            .expect("session row should be written");
+        assert_eq!(row.external_session_id, "claude-sess-abc");
+
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn claude_native_extracts_session_id_and_status() {
+        let ctx = mk_ctx("secret");
+
+        use crate::db::repo::{
+            NewTask, NewWorkspace, TaskRepo, TaskSessionRepo, WorkspacesRepo,
+        };
+        let task_id = {
+            let conn = ctx.db.lock().unwrap();
+            let (ws, _) = WorkspacesRepo::new(&conn)
+                .insert(NewWorkspace { name: "w".into(), sort_order: None })
+                .unwrap();
+            let (task, _) = TaskRepo::new(&conn)
+                .insert(NewTask {
+                    workspace_id: Some(ws.id),
+                    name: "t".into(),
+                    agent_preset: None,
+                    initial_prompt: None,
+                })
+                .unwrap();
+            task.id
+        };
+
+        let (port, join) = start_test_server(ctx.clone()).await;
+
+        // Claude's native PreToolUse-shaped payload (abbreviated to
+        // the fields weft cares about; everything else just rides in
+        // detail and is ignored).
+        let raw = serde_json::json!({
+            "session_id": "claude-sess-xyz",
+            "transcript_path": "/tmp/whatever.jsonl",
+            "cwd": "/tmp",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+        });
+        let _ = http_post_claude_native(port, &task_id, &raw, Some("secret")).await;
+
+        // session_id captured.
+        let conn = ctx.db.lock().unwrap();
+        let row = TaskSessionRepo::new(&conn)
+            .get(&task_id, "claude_code")
+            .unwrap()
+            .expect("session row should be written");
+        assert_eq!(row.external_session_id, "claude-sess-xyz");
+
+        // Status flipped to working (PreToolUse → Active).
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [&task_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "working");
+
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn claude_native_stop_event_flips_to_waiting() {
+        let ctx = mk_ctx("secret");
+        use crate::db::repo::{NewTask, NewWorkspace, TaskRepo, WorkspacesRepo};
+        let task_id = {
+            let conn = ctx.db.lock().unwrap();
+            let (ws, _) = WorkspacesRepo::new(&conn)
+                .insert(NewWorkspace { name: "w".into(), sort_order: None })
+                .unwrap();
+            let (task, _) = TaskRepo::new(&conn)
+                .insert(NewTask {
+                    workspace_id: Some(ws.id),
+                    name: "t".into(),
+                    agent_preset: None,
+                    initial_prompt: None,
+                })
+                .unwrap();
+            task.id
+        };
+
+        let (port, join) = start_test_server(ctx.clone()).await;
+        let raw = serde_json::json!({
+            "session_id": "s1",
+            "hook_event_name": "Stop",
+        });
+        let _ = http_post_claude_native(port, &task_id, &raw, Some("secret")).await;
+
+        let conn = ctx.db.lock().unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [&task_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "waiting");
+        join.abort();
+    }
+
+    #[tokio::test]
+    async fn claude_native_rejects_missing_task_header() {
+        let ctx = mk_ctx("secret");
+        let (port, join) = start_test_server(ctx).await;
+        let raw = serde_json::json!({"session_id": "s1", "hook_event_name": "Stop"});
+        let resp = http_post_claude_native_no_task_header(port, &raw, Some("secret")).await;
+        assert!(resp.contains("X-Weft-Task-Id"), "got: {resp}");
+        join.abort();
+    }
+
+    async fn http_post_claude_native(
+        port: u16,
+        task_id: &str,
+        body: &serde_json::Value,
+        token: Option<&str>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body_s = serde_json::to_string(body).unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let auth = token
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
+        let req = format!(
+            "POST /v1/claude_native HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nX-Weft-Task-Id: {task_id}\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body_s}",
+            body_s.len()
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let s = String::from_utf8_lossy(&buf).to_string();
+        s.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+    }
+
+    async fn http_post_claude_native_no_task_header(
+        port: u16,
+        body: &serde_json::Value,
+        token: Option<&str>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let body_s = serde_json::to_string(body).unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let auth = token
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
+        let req = format!(
+            "POST /v1/claude_native HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body_s}",
+            body_s.len()
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let s = String::from_utf8_lossy(&buf).to_string();
+        s.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+    }
+
+    #[tokio::test]
+    async fn empty_bearer_does_not_write_session_id() {
+        // ctx with empty token — the status path's dev bypass kicks in
+        // (token_ok returns true), but session_id capture uses
+        // token_ok_strict and should refuse.
+        let ctx = mk_ctx("");
+
+        use crate::db::repo::{
+            NewTask, NewWorkspace, TaskRepo, TaskSessionRepo, WorkspacesRepo,
+        };
+        let task_id = {
+            let conn = ctx.db.lock().unwrap();
+            let (ws, _) = WorkspacesRepo::new(&conn)
+                .insert(NewWorkspace {
+                    name: "w".into(),
+                    sort_order: None,
+                })
+                .unwrap();
+            let (task, _) = TaskRepo::new(&conn)
+                .insert(NewTask {
+                    workspace_id: Some(ws.id),
+                    name: "t".into(),
+                    agent_preset: None,
+                    initial_prompt: None,
+                })
+                .unwrap();
+            task.id
+        };
+
+        let (port, join) = start_test_server(ctx.clone()).await;
+        let event = HookEvent {
+            source: "claude_code".into(),
+            task_id: task_id.clone(),
+            kind: EventKind::Active,
+            detail: serde_json::json!({"session_id": "should-not-stick"}),
+            timestamp: 1,
+        };
+        let _ = http_post_json(port, "/v1/events", &event, None).await;
+
+        let conn = ctx.db.lock().unwrap();
+        let row = TaskSessionRepo::new(&conn)
+            .get(&task_id, "claude_code")
+            .unwrap();
+        assert!(row.is_none(), "session row should NOT be written without strict bearer");
 
         join.abort();
     }

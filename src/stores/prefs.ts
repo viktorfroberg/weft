@@ -14,11 +14,18 @@ export type FontWeight = 400 | 500 | 600;
 /**
  * Font family ids — one-of:
  *   "jetbrains-mono" | "fira-code" | "geist-mono" | "source-code-pro" | "system"
- * Kept as `string` so future user-installed fonts can slot in without a
- * type migration; `FONT_FAMILIES` in `src/lib/themes/fonts.ts` is the
- * authoritative list.
+ *   "custom:<uuid>" for user-added system fonts
+ * Kept as `string` so user-installed fonts can slot in without a
+ * type migration; `FONT_FAMILIES` in `src/lib/themes/fonts.ts` plus
+ * `customFonts` here are the authoritative source.
  */
 export type FontFamilyId = string;
+
+// `CustomFont` lives in the backend now (`services/fonts.rs::CustomFont`)
+// because file-imported fonts need a copied file on disk that can outlive
+// localStorage. The frontend store mirror is in `src/stores/custom_fonts.ts`.
+// The pre-v6 system-name shape stored here was removed; the v5→v6 migrate
+// drops the orphan field.
 
 interface PrefsState {
   theme: ThemePref;
@@ -94,8 +101,17 @@ const MAX_RECENT_TASKS = 20;
 
 /**
  * Persistent user preferences. Backed by localStorage under
- * `weft-prefs`. Version bumped 3 → 4 when v1.0.5 appearance fields
- * landed; no migrate fn (pre-release, stale slices get dropped).
+ * `weft-prefs`. Version history:
+ *   3 → 4  v1.0.5 appearance fields landed.
+ *   4 → 5  added `customFonts` (system-installed font references).
+ *   5 → 6  removed `customFonts` — moved to backend-managed file
+ *          imports (system fonts couldn't actually resolve in
+ *          WKWebView for third-party Font Book installs). Migrate
+ *          strips the orphan field; everything else is preserved.
+ *
+ * From v5 onwards we always ship an explicit `migrate` fn — without
+ * one, Zustand's persist middleware drops the entire persisted state
+ * on a version mismatch.
  */
 export const usePrefs = create<PrefsState>()(
   persist(
@@ -168,6 +184,24 @@ export const usePrefs = create<PrefsState>()(
           ),
         })),
     }),
-    { name: "weft-prefs", version: 4 },
+    {
+      name: "weft-prefs",
+      version: 6,
+      migrate: (persisted, fromVersion) => {
+        // Defensive: preserve every existing field; only mutate what
+        // each version-bump explicitly demands.
+        const prev = (persisted as Record<string, unknown>) ?? {};
+        if (fromVersion < 6) {
+          // Drop the v5 `customFonts` field if present — it pointed at
+          // system family names that often couldn't resolve in
+          // WKWebView. File-imported fonts are now backend-managed.
+          const { customFonts: _drop, ...rest } = prev as {
+            customFonts?: unknown;
+          } & Record<string, unknown>;
+          return rest as unknown as PrefsState;
+        }
+        return prev as unknown as PrefsState;
+      },
+    },
   ),
 );

@@ -68,7 +68,61 @@ pub fn reconcile_worktrees(conn: &Connection) -> Result<ReconcileReport> {
         tracing::warn!(error = %e, "warm-link health scan failed");
     }
 
+    if let Err(e) = reconcile_scrollback(conn) {
+        tracing::warn!(error = %e, "scrollback reconcile failed");
+    }
+
     Ok(report)
+}
+
+/// Remove scrollback files on disk that no longer have a matching
+/// `terminal_tabs` row. Handles the `task_delete` cascade (DB row goes
+/// away, but the file on disk isn't cleaned up as a side effect) and
+/// any orphans from crashes between mark_dormant and file write.
+pub fn reconcile_scrollback(conn: &Connection) -> Result<()> {
+    use crate::db::repo::TerminalTabRepo;
+
+    let Some(base) = dirs::data_dir() else {
+        return Ok(());
+    };
+    let dir = base.join("weft").join("scrollback");
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let known: std::collections::HashSet<String> =
+        TerminalTabRepo::new(conn).list_all_ids()?.into_iter().collect();
+
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "scrollback readdir entry failed");
+                continue;
+            }
+        };
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let tab_id = match name.strip_suffix(".bin") {
+            Some(id) => id,
+            None => continue,
+        };
+        if known.contains(tab_id) {
+            continue;
+        }
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!(path = %path.display(), error = %e, "scrollback unlink failed");
+        } else {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "startup reconcile: removed orphan scrollback files");
+    }
+    Ok(())
 }
 
 fn reconcile_warm_link_health(conn: &Connection) -> Result<()> {

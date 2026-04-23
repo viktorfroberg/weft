@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import {
   Bell,
   Columns2,
+  Eye,
   Monitor,
   Moon,
   MousePointer2,
@@ -14,15 +16,28 @@ import {
   X,
 } from "lucide-react";
 import { usePrefs, type ThemePref } from "@/stores/prefs";
+import { useCustomFonts } from "@/stores/custom_fonts";
+import {
+  fontPairItalicPick,
+  fontRemove,
+  fontRename,
+  fontSetLigatures,
+  fontSetVariable,
+  fontUnpairItalic,
+  type CustomFontRow,
+} from "@/lib/commands";
 import { useEffectiveTheme } from "@/lib/theme";
 import { BUNDLED_SCHEMES, type ColorScheme } from "@/lib/themes/schemes";
-import { FONT_FAMILIES } from "@/lib/themes/fonts";
+import { FONT_FAMILIES, mergeFonts } from "@/lib/themes/fonts";
 import { fireTestBell } from "@/lib/themes/bell";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { TerminalPreview } from "@/components/TerminalPreview";
 import { Card } from "./Card";
 import { AddSchemeDialog, SwatchRow } from "./AddSchemeDialog";
+import { AddSystemFontDialog } from "./AddSystemFontDialog";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 const THEME_OPTIONS: Array<{
   value: ThemePref;
@@ -59,23 +74,92 @@ export function AppearanceTab() {
   const cursorStyle = usePrefs((s) => s.cursorStyle);
   const cursorBlink = usePrefs((s) => s.cursorBlink);
   const bellStyle = usePrefs((s) => s.bellStyle);
+  const customFonts = useCustomFonts((s) => s.rows);
 
   const effective = useEffectiveTheme();
   const [addOpen, setAddOpen] = useState(false);
+  const [addFontOpen, setAddFontOpen] = useState(false);
+  const confirm = useConfirm();
 
   const allSchemes: ColorScheme[] = [...BUNDLED_SCHEMES, ...userSchemes];
   const darkSchemes = allSchemes.filter((s) => s.appearance === "dark");
   const lightSchemes = allSchemes.filter((s) => s.appearance === "light");
 
+  const allFonts = mergeFonts(customFonts);
   const activeFont =
-    FONT_FAMILIES.find((f) => f.id === terminalFontFamily) ??
-    FONT_FAMILIES[0];
+    allFonts.find((f) => f.id === terminalFontFamily) ?? FONT_FAMILIES[0];
+
+  // Stale-pref guard: if `terminalFontFamily` points at a custom id
+  // that no longer exists (e.g. corrupt localStorage, cross-device
+  // sync brought in an id we don't have here), reset to the default
+  // bundled font. Without this the `<select value={...}>` shows blank
+  // and React warns "value doesn't match an option".
+  useEffect(() => {
+    if (allFonts.some((f) => f.id === terminalFontFamily)) return;
+    setAppearance({ terminalFontFamily: "jetbrains-mono" });
+    // Run only on mount + when the row set changes (custom font
+    // added/removed). Intentionally not a dep on terminalFontFamily
+    // itself — the setter would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allFonts.length]);
+
+  const renameCustomFont = (id: string, newName: string) => {
+    fontRename(id, newName).catch((err) =>
+      console.warn("fontRename failed", err),
+    );
+  };
+  const toggleLigatures = (id: string, on: boolean) => {
+    fontSetLigatures(id, on).catch((err) =>
+      console.warn("fontSetLigatures failed", err),
+    );
+  };
+  const toggleVariable = (id: string, on: boolean) => {
+    fontSetVariable(id, on).catch((err) =>
+      console.warn("fontSetVariable failed", err),
+    );
+  };
+  const pairItalic = async (c: CustomFontRow) => {
+    try {
+      const updated = await fontPairItalicPick(c.id);
+      if (updated) {
+        toast.success(`Paired italic for ${updated.display_name}`);
+      }
+    } catch (err) {
+      toast.error("Couldn't pair italic", { description: String(err) });
+    }
+  };
+  const unpairItalic = (c: CustomFontRow) => {
+    fontUnpairItalic(c.id).catch((err) =>
+      console.warn("fontUnpairItalic failed", err),
+    );
+  };
+
+  const deleteCustomFont = async (c: CustomFontRow) => {
+    const ok = await confirm({
+      title: `Remove ${c.display_name}?`,
+      description:
+        "It'll disappear from the family dropdown and the imported file is deleted from weft's data dir. The original on your system is untouched.",
+      confirmText: "Remove",
+      destructive: true,
+    });
+    if (!ok) return;
+    // Rewrite the active pref BEFORE removal so the dropdown never
+    // holds a stale id between the two state updates.
+    if (terminalFontFamily === `custom:${c.id}`) {
+      setAppearance({ terminalFontFamily: "jetbrains-mono" });
+    }
+    fontRemove(c.id).catch((err) => console.warn("fontRemove failed", err));
+  };
 
   return (
     <div className="space-y-4">
-      {/* Preview sits above the controls so scheme/font/size changes
-          are visually obvious. Not inside a Card — it's the focus. */}
-      <TerminalPreview />
+      <Card
+        title="Preview"
+        description="Live sample. Reflects your current scheme, font, weight, ligatures, cursor, and padding choices."
+        Icon={Eye}
+      >
+        <TerminalPreview />
+      </Card>
 
       <Card
         title="Theme"
@@ -106,32 +190,26 @@ export function AppearanceTab() {
         description="Swap bundled schemes or paste your own. Chrome, terminal palette, and Monaco diff all flow from one coherent Base24 palette."
         Icon={Palette}
       >
-        <Row label="Dark">
-          <SchemeSegmented
-            value={schemeDark}
-            options={darkSchemes}
-            onChange={setSchemeDark}
-            onRemove={(id) => {
-              if (schemeDark === id) {
-                setSchemeDark("tokyo-night");
-              }
-              removeUserScheme(id);
-            }}
-          />
-        </Row>
-        <Row label="Light">
-          <SchemeSegmented
-            value={schemeLight}
-            options={lightSchemes}
-            onChange={setSchemeLight}
-            onRemove={(id) => {
-              if (schemeLight === id) {
-                setSchemeLight("catppuccin-latte");
-              }
-              removeUserScheme(id);
-            }}
-          />
-        </Row>
+        <SchemeGrid
+          label="Dark"
+          value={schemeDark}
+          options={darkSchemes}
+          onChange={setSchemeDark}
+          onRemove={(id) => {
+            if (schemeDark === id) setSchemeDark("tokyo-night");
+            removeUserScheme(id);
+          }}
+        />
+        <SchemeGrid
+          label="Light"
+          value={schemeLight}
+          options={lightSchemes}
+          onChange={setSchemeLight}
+          onRemove={(id) => {
+            if (schemeLight === id) setSchemeLight("catppuccin-latte");
+            removeUserScheme(id);
+          }}
+        />
         <div className="mt-3 flex justify-end">
           <Button
             size="sm"
@@ -159,9 +237,10 @@ export function AppearanceTab() {
             }
             className="bg-background border-border h-7 rounded border px-2 text-xs"
           >
-            {FONT_FAMILIES.map((f) => (
+            {allFonts.map((f) => (
               <option key={f.id} value={f.id}>
                 {f.name}
+                {f.kind === "custom" ? "  ·  custom" : ""}
               </option>
             ))}
           </select>
@@ -226,6 +305,130 @@ export function AppearanceTab() {
             disabled={!activeFont.ligatures}
           />
         </Row>
+      </Card>
+
+      <Card
+        title="Custom fonts"
+        description="Add a font file from your disk. Required for any third-party font (Maple Mono, Berkeley Mono, MonoLisa, etc.) — macOS's webview can't see your Font Book installs by name."
+        Icon={Type}
+      >
+        <div className="space-y-2">
+          {customFonts.length === 0 ? (
+            <p className="text-muted-foreground text-xs">
+              None added yet.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {customFonts.map((c) => (
+                <li
+                  key={c.id}
+                  className="border-border space-y-2 rounded-md border p-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <Input
+                      defaultValue={c.display_name}
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        if (v && v !== c.display_name) {
+                          renameCustomFont(c.id, v);
+                        } else if (!v) {
+                          // Reset the input to the existing name if
+                          // they cleared it.
+                          e.target.value = c.display_name;
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      className="h-7 flex-1 text-xs"
+                      aria-label="Display name"
+                    />
+                    <span className="text-muted-foreground font-mono text-[10px]">
+                      {c.file_basename}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => deleteCustomFont(c)}
+                      className="h-7 w-7 p-0"
+                      aria-label="Remove custom font"
+                    >
+                      <X size={12} />
+                    </Button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 text-xs">
+                    <label className="flex items-center gap-1.5">
+                      <Switch
+                        checked={c.ligatures}
+                        onCheckedChange={(v) => toggleLigatures(c.id, v)}
+                      />
+                      <span>Ligatures</span>
+                    </label>
+                    <label
+                      className="flex items-center gap-1.5"
+                      title="Only enable if your font has multiple weight files installed under one family. Single-weight fonts can show subtle cell-size jitter from synthetic-bold fallback."
+                    >
+                      <Switch
+                        checked={c.variable}
+                        onCheckedChange={(v) => toggleVariable(c.id, v)}
+                      />
+                      <span>Variable / weight slider</span>
+                    </label>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    {c.italic_file_basename ? (
+                      <>
+                        <span className="text-muted-foreground truncate">
+                          Italic: <span className="font-mono text-[10px]">{c.italic_file_basename}</span>
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => unpairItalic(c)}
+                          className="h-6 text-xs"
+                        >
+                          Remove italic
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-muted-foreground/70">
+                          No italic file paired — italic ANSI text falls back
+                          to the regular face.
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => pairItalic(c)}
+                          className="h-6 text-xs"
+                        >
+                          Pair italic file…
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAddFontOpen(true)}
+            className="h-7 gap-1 text-xs"
+          >
+            <Plus size={12} />
+            Add custom font…
+          </Button>
+        </div>
+        <AddSystemFontDialog open={addFontOpen} onOpenChange={setAddFontOpen} />
       </Card>
 
       <Card
@@ -391,59 +594,73 @@ function Segmented<T extends string>({
   );
 }
 
-function SchemeSegmented({
+/** Uniform-cell grid picker for color schemes. Each cell is the same
+ *  width regardless of scheme name length — the previous wrap-strip
+ *  layout had variable-width pills which packed unevenly and could
+ *  overflow at long names. CSS grid with `auto-fill, minmax` makes
+ *  the cells reflow into N columns based on container width while
+ *  keeping each cell predictable.
+ *
+ *  Each cell shows: swatch row + truncated name. Active cell gets a
+ *  ring + filled background. User-added schemes show a × on hover. */
+function SchemeGrid({
+  label,
   value,
   options,
   onChange,
   onRemove,
 }: {
+  label: string;
   value: string;
   options: ColorScheme[];
   onChange: (id: string) => void;
   onRemove: (id: string) => void;
 }) {
   return (
-    <div className="bg-muted flex flex-wrap gap-0.5 rounded-md p-0.5">
-      {options.map((s) => {
-        const active = s.id === value;
-        // Bundled schemes (tokyo-night, one-dark, catppuccin-latte,
-        // github-light) live in BUNDLED_SCHEMES and can't be removed.
-        // Everything added via paste-in / presets gets a "user-" or
-        // "preset-" id prefix.
-        const isUser = s.id.startsWith("user-") || s.id.startsWith("preset-");
-        return (
-          <div
-            key={s.id}
-            className={`group flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-all ${
-              active
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <button
-              type="button"
-              onClick={() => onChange(s.id)}
-              className="flex items-center gap-1.5"
+    <div className="py-3 first:pt-1">
+      <div className="text-muted-foreground mb-2 text-sm">{label}</div>
+      <div
+        className="grid gap-2"
+        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))" }}
+      >
+        {options.map((s) => {
+          const active = s.id === value;
+          const isUser =
+            s.id.startsWith("user-") || s.id.startsWith("preset-");
+          return (
+            <div
+              key={s.id}
+              className={`group border-border relative flex items-center gap-2 rounded-md border px-2.5 py-2 text-xs transition-all ${
+                active
+                  ? "ring-primary bg-accent text-foreground ring-2"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
             >
-              <SwatchRow scheme={s} compact />
-              {s.name}
-            </button>
-            {isUser && (
               <button
                 type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemove(s.id);
-                }}
-                className="text-muted-foreground hover:text-destructive opacity-0 transition-opacity group-hover:opacity-100"
-                title={`Remove ${s.name}`}
+                onClick={() => onChange(s.id)}
+                className="flex min-w-0 flex-1 items-center gap-2"
               >
-                <X size={10} />
+                <SwatchRow scheme={s} compact />
+                <span className="truncate">{s.name}</span>
               </button>
-            )}
-          </div>
-        );
-      })}
+              {isUser && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemove(s.id);
+                  }}
+                  className="text-muted-foreground hover:text-destructive opacity-0 transition-opacity group-hover:opacity-100"
+                  title={`Remove ${s.name}`}
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

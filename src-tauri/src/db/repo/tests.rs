@@ -243,6 +243,7 @@ fn mk_preset_db() -> Connection {
         include_str!("../../../migrations/0007_claude_preset_prompt_arg.sql"),
         include_str!("../../../migrations/0008_claude_preset_prompt_before_addir.sql"),
         include_str!("../../../migrations/0009_task_context_shared.sql"),
+        include_str!("../../../migrations/0012_agent_sessions_and_resume.sql"),
     ] {
         conn.execute_batch(sql).unwrap();
     }

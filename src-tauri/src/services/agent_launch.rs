@@ -45,6 +45,11 @@ pub struct ResolvedLaunch {
     pub task_id: String,
     /// For logging / UI.
     pub preset_name: String,
+    /// Per-launch flag: when true, the bootstrap branch in `expand_args`
+    /// is short-circuited. Used by `resolve_launch_resume` so a Claude
+    /// `--resume` doesn't get a bootstrap orientation injected on top
+    /// of a real conversation history.
+    pub suppress_bootstrap: bool,
 }
 
 /// Gather task context, apply preset template, return ready-to-spawn struct.
@@ -134,6 +139,15 @@ pub fn resolve_launch(
         "WEFT_HOOKS_URL".into(),
         "http://127.0.0.1:17293/v1/events".into(),
     ));
+    // No-deps Claude path: the agent's hook command can `curl
+    // --data-binary @-` Claude's raw stdin payload here and weft does
+    // the field extraction server-side. Removes the user-side `jq` /
+    // `python` requirement that the `/v1/events` path needed for
+    // session_id capture.
+    env.push((
+        "WEFT_HOOKS_URL_CLAUDE".into(),
+        "http://127.0.0.1:17293/v1/claude_native".into(),
+    ));
     // Bearer token for the hook server. Without this, the agent's status
     // POSTs will 401. Caller injects the token via `extra_env` because the
     // service doesn't hold AppState.
@@ -148,7 +162,57 @@ pub fn resolve_launch(
         cwd: PathBuf::from(primary),
         task_id: task.id.clone(),
         preset_name: preset.name.clone(),
+        suppress_bootstrap: false,
     })
+}
+
+/// Resume an external agent session (today: Claude Code) by splicing
+/// `--resume <id>` ahead of the preset's normal args. Used by the
+/// dormant-tab reopen path when a captured `task_agent_sessions` row
+/// exists for `(task_id, source)`.
+///
+/// Behavior:
+/// 1. `preset.supports_resume` MUST be true. Errors otherwise — this
+///    is a programmer-bug guard, not a runtime user condition; the UI
+///    only calls this when it has already confirmed the flag.
+/// 2. Drops `{prompt}` and `{bootstrap}` tokens entirely (and any
+///    preceding literal flag). Resume implies "no new system or user
+///    turn — just reattach".
+/// 3. Splices `["--resume", session_id]` immediately after the
+///    executable, before the preset's other args. Claude's CLI accepts
+///    `--resume <id>` in any position, but front-loading keeps it
+///    visible in `ps` output for debugging.
+/// 4. Sets `suppress_bootstrap = true` for downstream sanity (the
+///    bootstrap branches in `expand_args` already short-circuit when
+///    no `{prompt}` / `{bootstrap}` token is present, but the flag
+///    documents intent and lets future call sites short-circuit
+///    earlier).
+pub fn resolve_launch_resume(
+    conn: &Connection,
+    task_id: &str,
+    preset: &AgentPreset,
+    extra_env: &[(String, String)],
+    external_session_id: &str,
+) -> Result<ResolvedLaunch> {
+    if !preset.supports_resume {
+        return Err(anyhow!(
+            "preset {} does not support --resume",
+            preset.name
+        ));
+    }
+    if external_session_id.trim().is_empty() {
+        return Err(anyhow!("external_session_id is empty"));
+    }
+
+    // Reuse the normal launch path with `initial_prompt = None` so
+    // {prompt} / {bootstrap} tokens drop. Then splice `--resume <id>`
+    // at the front of args.
+    let mut resolved = resolve_launch(conn, task_id, preset, extra_env, None)?;
+    resolved.suppress_bootstrap = true;
+    let mut new_args = vec!["--resume".to_string(), external_session_id.to_string()];
+    new_args.append(&mut resolved.args);
+    resolved.args = new_args;
+    Ok(resolved)
 }
 
 struct TemplateContext {
@@ -297,6 +361,7 @@ mod tests {
             created_at: 0,
             bootstrap_prompt_template: None,
             bootstrap_delivery: None,
+            supports_resume: false,
         }
     }
 
@@ -493,6 +558,151 @@ mod tests {
         // drop it so we don't hand claude `--append-system-prompt`
         // with no value.
         assert_eq!(out, vec!["--name", "x", "user intent"]);
+    }
+
+    #[test]
+    fn resume_helper_rejects_non_resume_preset() {
+        // Build a real DB so resolve_launch (which resume calls into)
+        // has its task + worktree rows.
+        use crate::db::repo::{
+            NewProject, NewTask, NewTaskWorktree, NewWorkspace, NewWorkspaceRepo, ProjectRepo,
+            TaskRepo, TaskWorktreeRepo, WorkspaceRepoRepo, WorkspacesRepo,
+        };
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(include_str!("../../migrations/0001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0002_schema.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0004_task_tickets_and_branch.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0006_initial_prompt.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0010_task_name_locked_at.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0003_agent_presets.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/0012_agent_sessions_and_resume.sql"
+        ))
+        .unwrap();
+
+        let (ws, _) = WorkspacesRepo::new(&conn)
+            .insert(NewWorkspace { name: "w".into(), sort_order: None })
+            .unwrap();
+        let (p, _) = ProjectRepo::new(&conn)
+            .insert(NewProject {
+                name: "p".into(),
+                main_repo_path: "/tmp/fake".into(),
+                default_branch: "main".into(),
+                color: None,
+            })
+            .unwrap();
+        WorkspaceRepoRepo::new(&conn)
+            .insert(NewWorkspaceRepo {
+                workspace_id: ws.id.clone(),
+                project_id: p.id.clone(),
+                base_branch: None,
+                sort_order: None,
+            })
+            .unwrap();
+        let (t, _) = TaskRepo::new(&conn)
+            .insert(NewTask {
+                workspace_id: Some(ws.id),
+                name: "z".into(),
+                agent_preset: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let td = tempfile::tempdir().unwrap();
+        TaskWorktreeRepo::new(&conn)
+            .insert(NewTaskWorktree {
+                task_id: t.id.clone(),
+                project_id: p.id,
+                worktree_path: td.path().to_string_lossy().into_owned(),
+                task_branch: "weft/z".into(),
+                base_branch: "main".into(),
+                status: "ready".into(),
+            })
+            .unwrap();
+
+        let mut p = mk_preset(r#"["--name","{slug}"]"#);
+        p.supports_resume = false;
+        let err = resolve_launch_resume(&conn, &t.id, &p, &[], "sid").unwrap_err();
+        assert!(format!("{err}").contains("does not support --resume"));
+    }
+
+    #[test]
+    fn resume_helper_splices_resume_args_and_drops_prompt() {
+        use crate::db::repo::{
+            NewProject, NewTask, NewTaskWorktree, NewWorkspace, NewWorkspaceRepo, ProjectRepo,
+            TaskRepo, TaskWorktreeRepo, WorkspaceRepoRepo, WorkspacesRepo,
+        };
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(include_str!("../../migrations/0001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0002_schema.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0004_task_tickets_and_branch.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0006_initial_prompt.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0010_task_name_locked_at.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../../migrations/0003_agent_presets.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../migrations/0012_agent_sessions_and_resume.sql"
+        ))
+        .unwrap();
+
+        let (ws, _) = WorkspacesRepo::new(&conn)
+            .insert(NewWorkspace { name: "w".into(), sort_order: None })
+            .unwrap();
+        let (p, _) = ProjectRepo::new(&conn)
+            .insert(NewProject {
+                name: "p".into(),
+                main_repo_path: "/tmp/fake".into(),
+                default_branch: "main".into(),
+                color: None,
+            })
+            .unwrap();
+        WorkspaceRepoRepo::new(&conn)
+            .insert(NewWorkspaceRepo {
+                workspace_id: ws.id.clone(),
+                project_id: p.id.clone(),
+                base_branch: None,
+                sort_order: None,
+            })
+            .unwrap();
+        let (t, _) = TaskRepo::new(&conn)
+            .insert(NewTask {
+                workspace_id: Some(ws.id),
+                name: "z".into(),
+                agent_preset: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let td = tempfile::tempdir().unwrap();
+        TaskWorktreeRepo::new(&conn)
+            .insert(NewTaskWorktree {
+                task_id: t.id.clone(),
+                project_id: p.id,
+                worktree_path: td.path().to_string_lossy().into_owned(),
+                task_branch: "weft/z".into(),
+                base_branch: "main".into(),
+                status: "ready".into(),
+            })
+            .unwrap();
+
+        let mut preset = mk_preset(r#"["--name","{slug}","{prompt}"]"#);
+        preset.supports_resume = true;
+        let resolved =
+            resolve_launch_resume(&conn, &t.id, &preset, &[], "sess-xyz").unwrap();
+        // --resume must be first; {prompt} must be dropped (no initial prompt).
+        assert_eq!(resolved.args, vec!["--resume", "sess-xyz", "--name", "z"]);
+        assert!(resolved.suppress_bootstrap);
     }
 
     #[test]

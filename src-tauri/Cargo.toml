@@ -1,6 +1,6 @@
 [package]
 name = "weft"
-version = "0.1.0"
+version = "0.2.0-alpha"
 description = "Multi-repo agent orchestration"
 authors = ["Viktor Fröberg <viktorfroberg@gmail.com>"]
 edition = "2024"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
@@ -53,6 +53,10 @@ reqwest = { version = "0.13", features = ["json"] }
 # to the notes block. Used via `FileExt::try_lock_exclusive` in
 # `services/task_context.rs`.
 fs2 = "0.4"
+# VT parser for the scrollback recorder. Tracks alt-screen / CSI state
+# across read() boundaries so a `\x1b[?1049h` split across two chunks
+# still classifies correctly. See `terminal/recorder.rs`.
+vte = "0.13"
 
 [dev-dependencies]
 tempfile = "3"

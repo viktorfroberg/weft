@@ -9,8 +9,10 @@ pub mod preset;
 pub mod project;
 pub mod project_link;
 pub mod task;
+pub mod task_session;
 pub mod task_ticket;
 pub mod task_worktree;
+pub mod terminal_tab;
 pub mod workspace;
 
 #[cfg(test)]
@@ -20,8 +22,10 @@ pub use preset::{AgentPreset, BootstrapDelivery, NewAgentPreset, PresetPatch, Pr
 pub use project::{NewProject, ProjectRepo};
 pub use project_link::{LinkType, ProjectLinkInput, ProjectLinkRepo, ProjectLinkRow};
 pub use task::{NewTask, TaskRepo};
+pub use task_session::{AgentSessionRow, TaskSessionRepo};
 pub use task_ticket::{TaskTicketRepo, TaskTicketRow};
 pub use task_worktree::{NewTaskWorktree, TaskWorktreeRepo, TaskWorktreeRow};
+pub use terminal_tab::{NewTerminalTab, TabKind, TabState, TerminalTabRepo, TerminalTabRow};
 pub use workspace::{NewWorkspace, NewWorkspaceRepo, WorkspaceRepoRepo, WorkspacesRepo};
 
 /// Convenience: Unix-seconds timestamp.
