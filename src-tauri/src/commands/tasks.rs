@@ -147,7 +147,7 @@ pub async fn task_create(
         has_initial_prompt = initial_prompt.is_some(),
         "task_create",
     );
-    let base = worktrees_base_dir().map_err(|e| e.to_string())?;
+    let base = worktrees_base_dir().map_err(|e| format!("{e:#}"))?;
     let tickets = tickets.unwrap_or_default();
     let had_tickets = !tickets.is_empty();
     let out = create_task_with_worktrees(
@@ -165,7 +165,7 @@ pub async fn task_create(
         },
         std::sync::Arc::clone(&state.clone_fallbacks),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{e:#}"))?;
 
     for event in out.events {
         super::emit_event(&app, event);
@@ -247,7 +247,7 @@ pub fn task_delete(
         tracing::info!(task = %id, sessions = killed, "killed PTY sessions before delete");
     }
 
-    let report = cleanup_task(&state.db, &id).map_err(|e| e.to_string())?;
+    let report = cleanup_task(&state.db, &id).map_err(|e| format!("{e:#}"))?;
     for event in report.events {
         super::emit_event(&app, event);
     }
@@ -268,7 +268,7 @@ pub fn task_add_repo(
     project_id: String,
     base_branch: Option<String>,
 ) -> Result<WorktreeSummary, String> {
-    let base = worktrees_base_dir().map_err(|e| e.to_string())?;
+    let base = worktrees_base_dir().map_err(|e| format!("{e:#}"))?;
     let out = add_repo_to_task(
         &state.db,
         &base,
@@ -277,7 +277,7 @@ pub fn task_add_repo(
         base_branch,
         std::sync::Arc::clone(&state.clone_fallbacks),
     )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
 
     super::emit_event(&app, out.event);
 
@@ -310,7 +310,7 @@ pub fn task_remove_repo(
     project_id: String,
 ) -> Result<(), String> {
     let event = remove_repo_from_task(&state.db, &task_id, &project_id)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     super::emit_event(&app, event);
     Ok(())
 }
@@ -324,10 +324,10 @@ pub fn task_open_in_editor(
     task_id: String,
     editor: Option<String>,
 ) -> Result<String, String> {
-    let base = worktrees_base_dir().map_err(|e| e.to_string())?;
+    let base = worktrees_base_dir().map_err(|e| format!("{e:#}"))?;
     let editor = editor.unwrap_or_else(|| "code".to_string());
     let out = open_task_in_editor(&state.db, &base, &task_id, &editor)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     Ok(out.workspace_file.to_string_lossy().into_owned())
 }
 
