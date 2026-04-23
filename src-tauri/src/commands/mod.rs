@@ -9,6 +9,7 @@ pub mod changes;
 pub mod devlog;
 pub mod fonts;
 pub mod git;
+pub mod prefs;
 pub mod integrations;
 pub mod presets;
 pub mod project_links;

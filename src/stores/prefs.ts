@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { invoke } from "@tauri-apps/api/core";
 import type { ColorScheme } from "@/lib/themes/schemes";
 import {
   DEFAULT_DARK_ID,
@@ -205,3 +206,61 @@ export const usePrefs = create<PrefsState>()(
     },
   ),
 );
+
+// ─── Disk backup write-through ─────────────────────────────────────────
+// WKWebView localStorage is bundle-id-scoped and fragile across app
+// updates. We mirror the persisted blob to
+// `~/Library/Application Support/weft/prefs.json` — bundle-id-independent,
+// same tree as weft.db (which survives updates). On cold boot, the
+// bootstrap in `src/main.tsx` seeds localStorage from this file before
+// Zustand's persist middleware evaluates. See also the
+// `window.__weftPrefsSeedRan` guard check below.
+//
+// Ordering invariant — MUST hold:
+//   Zustand's `persist` middleware registers its own storage-write
+//   listener internally (inside the middleware wrapper that surrounds
+//   `set`). Our subscribe fires AFTER that listener, so the
+//   `localStorage.getItem("weft-prefs")` read below sees the FRESH
+//   value, not the pre-mutation one. Breaks silently if you ever wrap
+//   additional middleware OUTSIDE `persist` (e.g. `subscribeWithSelector`
+//   at the outer layer). Re-verify via manual verification step #3 in
+//   the plan.
+
+if (typeof window !== "undefined") {
+  const w = window as unknown as {
+    __weftPrefsSeedRan?: boolean;
+    __weftMirrorInstalled?: boolean;
+  };
+
+  // Runtime regression tripwire. If this flag is missing, a future
+  // refactor added a static import chain to `main.tsx` that reaches
+  // this module BEFORE the seed IIFE ran — the seed race is back.
+  if (!w.__weftPrefsSeedRan) {
+    console.warn(
+      "prefs.ts evaluated before the main.tsx seed step ran. " +
+        "Disk-backed prefs restore may not have applied. " +
+        "Check `src/main.tsx` for new static imports that reach prefs.",
+    );
+  }
+
+  // HMR guard: under Vite HMR this module re-evaluates; the old store
+  // and its subscribers remain GC-rooted, which would accumulate
+  // duplicate subscribers → N disk writes per mutation in dev.
+  if (!w.__weftMirrorInstalled) {
+    w.__weftMirrorInstalled = true;
+
+    let debounce: number | undefined;
+    usePrefs.subscribe(() => {
+      if (debounce) window.clearTimeout(debounce);
+      // 300ms batches rapid slider drags into one write. Human-rate
+      // mutations (toggle, dropdown pick) still round-trip in ~300ms.
+      debounce = window.setTimeout(() => {
+        const serialized = window.localStorage.getItem("weft-prefs");
+        if (!serialized) return;
+        invoke("prefs_write_backup", { json: serialized }).catch((e) =>
+          console.warn("prefs backup write failed", e),
+        );
+      }, 300);
+    });
+  }
+}

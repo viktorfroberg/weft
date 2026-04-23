@@ -235,6 +235,8 @@ pub fn run() {
             commands::fonts::font_set_variable,
             commands::fonts::font_pair_italic_pick,
             commands::fonts::font_unpair_italic,
+            commands::prefs::prefs_read_backup,
+            commands::prefs::prefs_write_backup,
         ])
         .on_window_event(|window, event| {
             use tauri::{Emitter, Manager};
